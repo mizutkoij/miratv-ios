@@ -153,17 +153,30 @@ struct EPGStationClient {
     }
 
     private func send(_ req: URLRequest) async throws -> Data {
-        let (data, res) = try await URLSession.shared.data(for: req)
+        let (data, res) = try await Net.data(req)
         if let http = res as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw ESError.http(http.statusCode, String(data: data.prefix(160), encoding: .utf8) ?? "")
         }
         return data
     }
 
-    private func get<T: Decodable>(_ path: String, _ query: [String: String] = [:], timeout: TimeInterval = 30) async throws -> T {
+    private func get<T: Decodable>(_ path: String, _ query: [String: String] = [:], timeout: TimeInterval = 30,
+                                   cacheKey: String? = nil) async throws -> T {
         var req = URLRequest(url: url(path, query))
         req.timeoutInterval = timeout
-        return try JSONDecoder().decode(T.self, from: try await send(req))
+        let data = try await send(req)
+        let value = try JSONDecoder().decode(T.self, from: data)
+        if let cacheKey { Net.store(data, key: cacheKey) }   // 復号できたものだけ保存する
+        return value
+    }
+
+    private static func scheduleKey(_ from: Date, _ types: [String]) -> String {
+        "es-schedules-\(types.joined(separator: "+"))-\(Int(from.timeIntervalSince1970))"
+    }
+
+    /// 前回取れた番組表（同じ帯・同じ開始時刻）。番組表は放送後に変わりにくいので 3 日まで使う
+    static func cachedSchedules(from: Date, types: [String]) -> [ESSchedule]? {
+        Net.storedValue([LossyDecodable<ESSchedule>].self, key: scheduleKey(from, types), maxAge: 3 * 86400)?.compactMap(\.value)
     }
 
     private static func ms(_ d: Date) -> String { String(Int64(d.timeIntervalSince1970 * 1000)) }
@@ -175,7 +188,8 @@ struct EPGStationClient {
         var q: [String: String] = ["startAt": Self.ms(from), "endAt": Self.ms(to), "isHalfWidth": "true",
                                    "GR": "false", "BS": "false", "CS": "false", "SKY": "false"]
         for t in types { q[t] = "true" }
-        let list: [LossyDecodable<ESSchedule>] = try await get("api/schedules", q, timeout: 60)
+        let list: [LossyDecodable<ESSchedule>] = try await get("api/schedules", q, timeout: 60,
+                                                               cacheKey: Self.scheduleKey(from, types))
         return list.compactMap(\.value)
     }
 
@@ -259,11 +273,20 @@ struct EPGStationClient {
 
     // MARK: 録画・ルール・容量
 
+    /// 前回取れた録画一覧の先頭ページ
+    static func cachedRecorded() -> (records: [ESRecorded], total: Int)? {
+        struct R: Decodable { let records: [LossyDecodable<ESRecorded>]; let total: Int? }
+        guard let r = Net.storedValue(R.self, key: "es-recorded-first", maxAge: 30 * 86400) else { return nil }
+        let recs = r.records.compactMap(\.value)
+        return (recs, r.total ?? recs.count)
+    }
+
     func recorded(offset: Int = 0, limit: Int = 30) async throws -> (records: [ESRecorded], total: Int) {
         struct R: Decodable { let records: [LossyDecodable<ESRecorded>]; let total: Int? }
         // isReverse=true は「古い順」（実測）。新しい順にしたいので指定しない
         let r: R = try await get("api/recorded", ["isHalfWidth": "true",
-                                                   "offset": String(offset), "limit": String(limit)])
+                                                   "offset": String(offset), "limit": String(limit)],
+                                 cacheKey: offset == 0 ? "es-recorded-first" : nil)
         let recs = r.records.compactMap(\.value)
         return (recs, r.total ?? recs.count)
     }

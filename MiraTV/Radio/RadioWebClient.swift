@@ -155,7 +155,10 @@ struct RadioWebClient {
     }
 
     // 読み取り系
-    func stations() async throws -> RadioCatalog { try await get("api/stations") }
+    func stations() async throws -> RadioCatalog { try await get("api/stations", cacheKey: "radio-stations") }
+
+    /// 前回取れた局一覧。局の構成は滅多に変わらないので、画面を開いた瞬間にこれを出す
+    static func cachedStations() -> RadioCatalog? { Net.storedValue(RadioCatalog.self, key: "radio-stations", maxAge: 90 * 86400) }
 
     func nowPlaying(radikoId: String) async throws -> RadioNowPlaying {
         try await get("api/nowplaying/radiko/\(radikoId)")
@@ -163,7 +166,8 @@ struct RadioWebClient {
 
     /// 日付は 05:00〜翌 05:00 区切り。過去日もOK（radiko は nzb 付きで返る）
     func schedule(source: RadioSource, station: String, date: Date) async throws -> RadioSchedule {
-        try await get("api/station/schedule", ["source": source.rawValue, "station": station, "date": Self.dayFormatter.string(from: date)])
+        try await get("api/station/schedule", ["source": source.rawValue, "station": station, "date": Self.dayFormatter.string(from: date)],
+                      cacheKey: "radio-sched-\(source.rawValue)-\(station)-\(Self.dayFormatter.string(from: date))")
     }
 
     /// q / date / region のどれかが必須（空だと results:[]）。radiko はサーバーに実ファイルが残っている回のみ
@@ -198,10 +202,10 @@ struct RadioWebClient {
 
     // MARK: HTTP
 
-    private func get<T: Decodable>(_ path: String, _ query: [String: String] = [:]) async throws -> T {
+    private func get<T: Decodable>(_ path: String, _ query: [String: String] = [:], cacheKey: String? = nil) async throws -> T {
         var req = URLRequest(url: url(path, query))
-        req.timeoutInterval = 45   // 局一覧は約 350KB。中継経由でも間に合うよう長めに
-        return try await send(req)
+        req.timeoutInterval = 45   // 1 回の試行は Net が 15 秒で切って再試行する
+        return try await send(req, cacheKey: cacheKey)
     }
 
     private func post<T: Decodable>(_ path: String, _ body: [String: String], timeout: TimeInterval) async throws -> T {
@@ -213,13 +217,15 @@ struct RadioWebClient {
         return try await send(req)
     }
 
-    private func send<T: Decodable>(_ req: URLRequest) async throws -> T {
-        let (data, res) = try await URLSession.shared.data(for: req)
+    private func send<T: Decodable>(_ req: URLRequest, cacheKey: String? = nil) async throws -> T {
+        let (data, res) = try await Net.data(req)
         if let http = res as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw RadioWebError.http(http.statusCode)
         }
         if T.self == EmptyResponse.self { return EmptyResponse() as! T }
-        return try JSONDecoder().decode(T.self, from: data)
+        let value = try JSONDecoder().decode(T.self, from: data)
+        if let cacheKey { Net.store(data, key: cacheKey) }
+        return value
     }
 
     static let dayFormatter: DateFormatter = {

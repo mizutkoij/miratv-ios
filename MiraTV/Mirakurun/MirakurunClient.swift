@@ -31,12 +31,19 @@ struct MirakurunClient {
 
     func services() async throws -> [MirakurunService] {
         var req = URLRequest(url: baseURL.appending(path: "api/services"))
-        req.timeoutInterval = 30   // Tailscale が中継(DERP)経由だと遅いので長めに
-        let (data, res) = try await URLSession.shared.data(for: req)
+        req.timeoutInterval = 30
+        let (data, res) = try await Net.data(req)
         if let http = res as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw URLError(.badServerResponse)
         }
-        return try JSONDecoder().decode([MirakurunService].self, from: data)
+        let list = try JSONDecoder().decode([MirakurunService].self, from: data)
+        Net.store(data, key: "mirakurun-services")
+        return list
+    }
+
+    /// 前回取れた局一覧（放送局の構成はほぼ変わらないので、起動直後はこれを先に出す）
+    static func cachedServices() -> [MirakurunService]? {
+        Net.storedValue([MirakurunService].self, key: "mirakurun-services", maxAge: 90 * 86400)
     }
 
     /// サービス単位の TS ストリーム。decode=1 で Mirakurun 側のデコーダ設定を使う
@@ -59,7 +66,7 @@ struct MirakurunClient {
                         URLQueryItem(name: "serviceId", value: String(service.serviceId))]
         var req = URLRequest(url: c.url!)
         req.timeoutInterval = 45
-        let (data, res) = try await URLSession.shared.data(for: req)
+        let (data, res) = try await Net.data(req)
         if let http = res as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw URLError(.badServerResponse)
         }

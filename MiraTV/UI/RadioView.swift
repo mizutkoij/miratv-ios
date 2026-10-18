@@ -95,10 +95,11 @@ struct RadioView: View {
     private func load() async {
         guard let client else { errorText = "URL が不正です"; return }
         radio.configure(client: client)
-        loading = true
+        if catalog == nil, let c = RadioWebClient.cachedStations() { catalog = c }   // 前回の局一覧を先に出す
+        loading = catalog == nil
         defer { loading = false }
         do { catalog = try await client.stations(); errorText = nil }
-        catch { errorText = "局一覧の取得に失敗: \(describeError(error))" }
+        catch { if catalog == nil { errorText = "局一覧の取得に失敗: \(describeError(error))" } }   // 前回分が出ていれば、失敗は黙って次回に回す
     }
 }
 

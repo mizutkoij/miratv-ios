@@ -36,7 +36,11 @@ final class PlayerEngine: ObservableObject {
     private var speedValue: Double = 1.0    // clockLock で保護
     private var seekPendingFlag = false     // clockLock で保護
     /// 入れ済みの映像・音声の末尾の PTS（秒）。clockLock で保護。時計がこれに追いついたら「データ切れ」
-    private var mediaEnd: Double = 0
+    private var videoEnd: Double = 0
+    private var audioEnd: Double = 0
+    /// 時計が使う「貯まっている末尾」。音声があるときは、映像と音声のうち短いほう。
+    /// （片方だけ先に着いても、もう片方が尽きれば止める。帯域が足りないとき、映像は進むのに音だけ途切れて無音になるのを防ぐ）
+    private var mediaEnd: Double { expectAudio && audioEnd > 0 ? min(videoEnd, audioEnd) : videoEnd }
     /// データ切れで時計を止めている間 true（clockLock で保護）。止めないと、遅れて届いた音声が
     /// すべて「過去の時刻」扱いで捨てられ、無音のまま追いつけなくなる
     private var stalled = false
@@ -91,7 +95,7 @@ final class PlayerEngine: ObservableObject {
         try? AVAudioSession.sharedInstance().setActive(true)
         clockLock.lock()
         clockStarted = false; firstAudioPTS = nil; sawVideo = false; expectAudio = true
-        pausedFlag = false; seekPendingFlag = false; mediaEnd = 0; stalled = false
+        pausedFlag = false; seekPendingFlag = false; videoEnd = 0; audioEnd = 0; stalled = false
         clockLock.unlock()
         state = .connecting
         positionTimer?.invalidate(); positionTimer = nil
@@ -174,6 +178,10 @@ final class PlayerEngine: ObservableObject {
         let now = synchronizer.currentTime().seconds
         guard now.isFinite, end > 0 else { return }
         let buffered = end - now
+        if audioRenderer.status == .failed {
+            DebugLog.log("player", "音声レンダラが失敗: \(String(describing: audioRenderer.error))。作り直さず flush して続行")
+            audioRenderer.flush()
+        }
         if !wasStalled {
             // 録画の最後まで読み終えたあとは、残りを再生し切るだけなので止めない
             if buffered < 0.05, !(isFile && effectiveDuration > 0 && end - startTime >= effectiveDuration - 1.0) {
@@ -232,7 +240,7 @@ final class PlayerEngine: ObservableObject {
         videoRenderer.enqueue(sb)
         clockLock.lock()
         sawVideo = true
-        mediaEnd = max(mediaEnd, (sb.presentationTimeStamp + sb.duration).seconds)
+        videoEnd = max(videoEnd, (sb.presentationTimeStamp + sb.duration).seconds)
         let shouldStartVideoOnly = !clockStarted && !expectAudio
         if shouldStartVideoOnly { clockStarted = true }
         clockLock.unlock()
@@ -245,7 +253,7 @@ final class PlayerEngine: ObservableObject {
         audioRenderer.enqueue(sb)
         let pts = sb.presentationTimeStamp
         clockLock.lock()
-        mediaEnd = max(mediaEnd, (pts + sb.duration).seconds)
+        audioEnd = max(audioEnd, (pts + sb.duration).seconds)
         if firstAudioPTS == nil { firstAudioPTS = pts }
         var startAt: CMTime?
         if !clockStarted, sawVideo, let first = firstAudioPTS,
@@ -318,7 +326,7 @@ final class PlayerEngine: ObservableObject {
         videoRenderer.flush(removingDisplayedImage: false, completionHandler: nil)
         synchronizer.setRate(0, time: .zero)
         clockLock.lock()
-        clockStarted = false; firstAudioPTS = nil; sawVideo = false; seekPendingFlag = false; mediaEnd = 0; stalled = false
+        clockStarted = false; firstAudioPTS = nil; sawVideo = false; seekPendingFlag = false; videoEnd = 0; audioEnd = 0; stalled = false
         clockLock.unlock()
         captionLock.lock(); captionQueue.removeAll(); captionLock.unlock()
         DispatchQueue.main.async { [weak self] in

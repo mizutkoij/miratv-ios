@@ -225,18 +225,23 @@ struct GuideView: View {
         let key = "\(band)-\(Int(start.timeIntervalSince1970))"
         if let c = cache[key] { columns = c; errorText = nil; return }
         guard let es = Servers.epgstation else { errorText = "EPGStation の URL が設定されていません"; return }
-        loading = true
+        let types = band == "CS" ? ["CS", "SKY"] : [band]
+        // 前回取った番組表があれば先に出して、裏で取り直す
+        if columns.isEmpty, let old = EPGStationClient.cachedSchedules(from: start, types: types) {
+            columns = old.sorted { ($0.channel.remoteControlKeyId ?? 999, $0.channel.serviceId ?? 0)
+                                 < ($1.channel.remoteControlKeyId ?? 999, $1.channel.serviceId ?? 0) }
+        }
+        loading = columns.isEmpty
         defer { loading = false }
         do {
-            var list = try await es.schedules(from: start, to: start.addingTimeInterval(86400),
-                                              types: band == "CS" ? ["CS", "SKY"] : [band])
+            var list = try await es.schedules(from: start, to: start.addingTimeInterval(86400), types: types)
             list.sort { ($0.channel.remoteControlKeyId ?? 999, $0.channel.serviceId ?? 0)
                       < ($1.channel.remoteControlKeyId ?? 999, $1.channel.serviceId ?? 0) }
             cache[key] = list
             columns = list
             errorText = nil
         } catch {
-            errorText = describeError(error)
+            if columns.isEmpty { errorText = describeError(error) }
         }
     }
 }

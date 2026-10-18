@@ -128,14 +128,15 @@ struct ChannelListView: View {
 
     private func load() async {
         guard let client else { errorText = "URL が不正です"; return }
-        loading = true
+        if services.isEmpty, let c = MirakurunClient.cachedServices() { services = c }   // 前回の局一覧を先に出す
+        loading = services.isEmpty
         defer { loading = false }
         do {
             services = try await client.services()
             errorText = nil
             await epg.refreshOverview(es: Servers.epgstation, force: true)
         } catch {
-            errorText = "取得に失敗: \(describeError(error))"
+            if services.isEmpty { errorText = "取得に失敗: \(describeError(error))" }
         }
     }
 }
