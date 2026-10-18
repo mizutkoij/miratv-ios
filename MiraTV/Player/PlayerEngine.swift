@@ -185,6 +185,7 @@ final class PlayerEngine: ObservableObject {
 
     func stop() {
         frameLock.lock(); lastFrame = nil; frameLock.unlock()     // 選局直後に前の局の 1 枚を保存しないように
+        cancelClip()
         // 世代を進めて、throttle() で待っている読み込みスレッドを確実に抜けさせる
         genLock.lock(); generation += 1; genLock.unlock()
         captionTimer?.invalidate(); captionTimer = nil
@@ -267,6 +268,54 @@ final class PlayerEngine: ObservableObject {
     private let frameLock = NSLock()
     private var lastFrame: CVPixelBuffer?
 
+    // MARK: 動画で保存（クリップ）
+    private var clip: ClipRecorder?          // frameLock で保護
+    @Published private(set) var isRecordingClip = false
+
+    /// 押した時点からの映像と音声を動画に書き始める。映像がまだ無ければ false（メインスレッドから）
+    @discardableResult
+    func startClip(onLimit: @escaping () -> Void) -> Bool {
+        frameLock.lock(); let pb = lastFrame; let busy = clip != nil; frameLock.unlock()
+        guard let pb, !busy else { return false }
+        let h = min(CVPixelBufferGetHeight(pb), 1080)
+        var w = Int((Double(h) * info.displayAspect).rounded())
+        w -= w % 2
+        guard let rec = ClipRecorder(width: w, height: h - h % 2) else { return false }
+        rec.onLimit = onLimit
+        frameLock.lock()
+        if clip != nil { frameLock.unlock(); rec.cancel(); return false }
+        clip = rec
+        frameLock.unlock()
+        isRecordingClip = true
+        return true
+    }
+
+    /// 止める（メインスレッドから）。書き出しと保存は返した ClipRecorder の finishAndSave() で
+    func takeClip() -> ClipRecorder? {
+        frameLock.lock(); let rec = clip; clip = nil; frameLock.unlock()
+        isRecordingClip = false
+        return rec
+    }
+
+    /// 書いている途中のクリップを捨てる（選局・シーク・停止）
+    private func cancelClip() {
+        frameLock.lock(); let rec = clip; clip = nil; frameLock.unlock()
+        guard let rec else { return }
+        rec.cancel()
+        let update = { [weak self] in
+            guard let self else { return }
+            // その間に新しいクリップを始めていたら触らない
+            self.frameLock.lock(); let none = self.clip == nil; self.frameLock.unlock()
+            if none { self.isRecordingClip = false }
+        }
+        if Thread.isMainThread { update() } else { DispatchQueue.main.async(execute: update) }
+    }
+
+    var clipSeconds: Double {
+        frameLock.lock(); let rec = clip; frameLock.unlock()
+        return rec?.seconds ?? 0
+    }
+
     /// いま映っている 1 枚（表示の縦横比 = DAR に直したもの）。字幕・実況コメントは入らない
     func captureImage() -> UIImage? {
         frameLock.lock(); let pb = lastFrame; frameLock.unlock()
@@ -284,7 +333,8 @@ final class PlayerEngine: ObservableObject {
             videoRenderer.flush()
         }
         if let pb = CMSampleBufferGetImageBuffer(sb) {
-            frameLock.lock(); lastFrame = pb; frameLock.unlock()
+            frameLock.lock(); lastFrame = pb; let rec = clip; frameLock.unlock()
+            rec?.appendVideo(sb)
         }
         videoRenderer.enqueue(sb)
         clockLock.lock()
@@ -299,6 +349,8 @@ final class PlayerEngine: ObservableObject {
     }
 
     private func enqueueAudio(_ sb: CMSampleBuffer) {
+        frameLock.lock(); let rec = clip; frameLock.unlock()
+        rec?.appendAudio(sb)
         audioRenderer.enqueue(sb)
         let pts = sb.presentationTimeStamp
         clockLock.lock()
@@ -380,6 +432,7 @@ final class PlayerEngine: ObservableObject {
 
     /// パイプラインがシークを終えた（読み込み位置が変わった）。描画側のバッファを捨てて時計を取り直す
     private func resetAfterSeek() {
+        cancelClip()               // 時刻が飛ぶので、書いている途中のクリップは捨てる
         audioRenderer.flush()
         videoRenderer.flush(removingDisplayedImage: false, completionHandler: nil)
         synchronizer.setRate(0, time: .zero)

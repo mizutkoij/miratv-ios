@@ -136,6 +136,22 @@ struct PlayerView: View {
         Task { showToast(await CaptureSaver.save(img)) }
     }
 
+    /// 動画で保存（クリップ）: 1 回目で書き始め、もう 1 回で止めて写真アプリへ。最大 5 分
+    private func toggleClip() {
+        if engine.isRecordingClip {
+            guard let rec = engine.takeClip() else { return }
+            showToast("動画を書き出しています…")
+            Task {
+                let msg = await rec.finishAndSave()
+                if !msg.isEmpty { showToast(msg) }
+            }
+        } else if engine.startClip(onLimit: { if engine.isRecordingClip { toggleClip() } }) {
+            showToast("録画を始めました（もう一度押すと保存・最大 5 分）")
+        } else {
+            showToast("まだ映像がありません")
+        }
+    }
+
     /// ロック画面の再生 / 停止。ライブは一時停止できないので、止める → もう一度押すと選局し直す
     private func toggleLivePlayback() {
         if livePaused {
@@ -237,6 +253,11 @@ struct PlayerView: View {
             showToast("追っかけ用の録画が途切れたので、ライブに戻しました")
             goLive()
         }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            // 背面・PiP ではハードウェアのエンコーダーが使えないので、それまでの分で保存する
+            if engine.isRecordingClip { toggleClip() }
+        }
+        .onChange(of: engine.pip.isActive) { _, on in if on && engine.isRecordingClip { toggleClip() } }
         .onChange(of: program?.id) { _, _ in updateNowPlaying() }
         .onChange(of: current.id) { _, _ in livePaused = false; updateNowPlaying() }
         .onDisappear {
@@ -657,13 +678,16 @@ struct PlayerView: View {
     }
 
     private var controlRow: some View {
-        HStack(spacing: 8) {
+        // 8 個あるので 4 列 × 2 段（1 段だと字が詰まる）
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
             ControlTile(icon: "captions.bubble", label: "字幕", enabled: captionAvailable, active: captionsOn) { toggleCaptions() }
             ControlTile(icon: "speaker.wave.2", label: audioLabel, enabled: audioSelectable,
                         active: audioSelectable && engine.audioMode != .both) { cycleAudio() }
             ControlTile(icon: "d.circle", label: "データ", enabled: dataAvailable, active: dataMode) { dataMode.toggle() }
             ControlTile(icon: "text.bubble", label: "実況", enabled: jkID != nil, active: commentsOn) { commentsOn.toggle() }
             ControlTile(icon: "camera", label: "写真", enabled: !isHLS && !isAudioOnly) { capture() }
+            ControlTile(icon: engine.isRecordingClip ? "stop.circle.fill" : "record.circle", label: engine.isRecordingClip ? "保存" : "録画",
+                        enabled: !isHLS && !isAudioOnly, active: engine.isRecordingClip) { toggleClip() }
             PiPTile(pip: engine.pip, supported: !isHLS && !isAudioOnly)
             ControlTile(icon: "arrow.up.left.and.arrow.down.right", label: "全画面") { setOrientation(.landscape) }
         }
@@ -851,6 +875,8 @@ struct PlayerView: View {
             CapsuleTile(label: "d", enabled: dataAvailable, active: dataMode) { dataMode.toggle() }
             CapsuleTile(label: "実況", enabled: jkID != nil, active: commentsOn) { commentsOn.toggle() }
             CapsuleTile(label: "写真", enabled: !isHLS && !isAudioOnly) { capture() }
+            CapsuleTile(label: engine.isRecordingClip ? "● 保存" : "録画", enabled: !isHLS && !isAudioOnly,
+                        active: engine.isRecordingClip) { toggleClip() }
             PiPCapsule(pip: engine.pip, supported: !isHLS && !isAudioOnly)
         }
         .padding(.horizontal, 16).padding(.vertical, 8)

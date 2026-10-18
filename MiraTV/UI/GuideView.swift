@@ -31,6 +31,8 @@ struct GuideView: View {
     }
     @State private var cache: [String: [ESSchedule]] = [:]
     @State private var loading = false
+    /// 表示中の日を一度でも読み終えたか（読み込み前に「番組情報なし」を出さないため）
+    @State private var loadedDay: Int?
     @State private var errorText: String?
     @State private var selected: GuideSelection?
     @State private var now = Date()
@@ -46,8 +48,8 @@ struct GuideView: View {
         return c
     }
 
-    /// 今日から 7 日分（今日 + 6 日）
-    private static let dayCount = 7
+    /// 昨日・今日・その先 7 日（放送の番組情報はおよそ 8 日先まで来る）
+    private static let dayOffsets = Array(-1...7)
 
     /// 1 日は 0:00〜24:00（JST）。日をまたぐ番組は、前の日では下端・次の日では上端で切れて両方に出る
     private func dayStart(_ offset: Int) -> Date {
@@ -62,6 +64,7 @@ struct GuideView: View {
     private func bandLabel(_ b: String) -> String { b == "GR" ? "地上波" : b }
 
     private func dayLabel(_ offset: Int) -> String {
+        if offset == -1 { return "昨日" }
         if offset == 0 { return "今日" }
         if offset == 1 { return "明日" }
         let d = Self.jst.date(byAdding: .day, value: offset, to: Self.jst.startOfDay(for: Date()))!
@@ -99,7 +102,7 @@ struct GuideView: View {
                 }
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
-                        ForEach(0..<Self.dayCount, id: \.self) { i in
+                        ForEach(Self.dayOffsets, id: \.self) { i in
                             ChipView(label: dayLabel(i), selected: i == dayOffset) { dayOffset = i }
                         }
                     }
@@ -109,6 +112,15 @@ struct GuideView: View {
 
                 if loading && columns.isEmpty {
                     ProgressView().tint(Theme.C.accent).frame(maxWidth: .infinity).padding(.top, 40)
+                }
+                if !loading && errorText == nil && loadedDay == dayOffset && !columns.isEmpty
+                    && displayColumns.allSatisfy({ visiblePrograms($0).isEmpty }) {
+                    Text(dayOffset < 0
+                         ? "前の日の番組情報はサーバーに残っていません（EPGStation は終わった番組を消します）。録画した番組は録画タブにあります。"
+                         : "この日の番組情報はまだ届いていません。放送の番組情報はおよそ 8 日先まで、近づくと増えていきます。")
+                        .font(Theme.F.jp(13)).foregroundStyle(Theme.C.text3)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity).padding(.horizontal, 24).padding(.top, 40)
                 }
                 grid
             }
@@ -271,10 +283,15 @@ struct GuideView: View {
     /// 端末に 1 時間以内の分があれば取らない。日付や放送波を切り替えると task ごと止まる
     private func prefetchOtherDays() async {
         guard let es = Servers.epgstation else { return }
-        for offset in 0..<Self.dayCount where offset != dayOffset {
+        for offset in Self.dayOffsets where offset != dayOffset {
             if Task.isCancelled { return }
             let key = cacheKey(offset)
             if cache[key] != nil { continue }
+            // 過去の日は、端末に残っている分があれば取り直さない（サーバーの分は消えかけていて、上書きすると減る）
+            if offset < 0, let saved = EPGStationClient.cachedSchedules(key: "guide-" + key), !saved.isEmpty {
+                cache[key] = Self.sorted(saved)
+                continue
+            }
             if (DiskCache.age("guide-" + key) ?? .infinity) < 3600,
                let saved = EPGStationClient.cachedSchedules(key: "guide-" + key), !saved.isEmpty {
                 cache[key] = Self.sorted(saved)
@@ -292,6 +309,8 @@ struct GuideView: View {
     /// このセッションで取れたものはそのまま使う。端末に前回の分があればまずそれを出し、裏で取り直す
     /// （番組表は 1 日 1MB 前後あり、毎回待つと「接続中」が長い）
     private func load() async {
+        let day = dayOffset
+        defer { if day == dayOffset { loadedDay = day } }
         let key = cacheKey(dayOffset)
         if let c = cache[key] { columns = c; errorText = nil; return }
         let diskKey = "guide-" + key
@@ -301,6 +320,8 @@ struct GuideView: View {
             errorText = nil
             showingStale = true
         }
+        // 過去の日: サーバーは終わった番組を消していくので、端末に残っている分（その日に見たときのもの）を優先する
+        if dayOffset < 0, showingStale { cache[key] = columns; return }
         guard let es = Servers.epgstation else { errorText = "EPGStation の URL が設定されていません"; return }
         loading = true
         defer { loading = false }
