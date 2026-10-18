@@ -5,6 +5,7 @@ struct SettingsView: View {
     @AppStorage("mirakurunURL") private var mirakurunURL = Defaults.mirakurunURL
     @AppStorage("epgstationURL") private var epgstationURL = Defaults.epgstationURL
     @AppStorage("radioWebURL") private var radioURL = Defaults.radioWebURL
+    @AppStorage("radioSearchURL") private var radioSearchURL = Defaults.radioSearchURL
     @AppStorage("webbmlURL") private var webbmlURL = Defaults.webbmlURL
     @AppStorage("chapterURL") private var chapterURL = Defaults.chapterURL
     @AppStorage("streamdURL") private var streamdURL = Defaults.streamdURL
@@ -37,6 +38,8 @@ struct SettingsView: View {
                     field("Mirakurun（テレビの映像・局一覧）", $mirakurunURL, Defaults.mirakurunURL, key: "mirakurun")
                     field("EPGStation（番組表・録画・変換配信）", $epgstationURL, Defaults.epgstationURL, key: "epgstation")
                     field("radio-web（ラジオ）", $radioURL, Defaults.radioWebURL, key: "radio")
+                    field("ラジオ検索（過去の番組を探す）", $radioSearchURL, Defaults.radioSearchURL, key: "radiosearch",
+                          hint: "VPS2 の radio-search。約 50 万件の過去番組を全文検索します（端末には全件を持ちません）。")
                     field("web-bml（データ放送）", $webbmlURL, Defaults.webbmlURL, key: "webbml",
                           hint: "homeserver の Docker コンテナで動いています。空にすると「データ」ボタンは使えません。")
                     field("中継 streamd（軽いストリーム）", $streamdURL, Defaults.streamdURL, key: "streamd",

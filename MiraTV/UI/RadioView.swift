@@ -6,6 +6,7 @@ struct RadioView: View {
     @EnvironmentObject private var radio: RadioPlayer
 
     @State private var catalog: RadioCatalog?
+    @State private var showSearch = false
     @State private var region: String?
     @State private var query = ""
     @State private var errorText: String?
@@ -47,7 +48,13 @@ struct RadioView: View {
                     ScreenHeader(title: "ラジオ",
                                  status: StatusLine(text: statusText,
                                                     color: errorText == nil ? Theme.C.live : Theme.C.rec)) {
-                        EmptyView()
+                        Button { showSearch = true } label: {
+                            Label("過去を探す", systemImage: "clock.arrow.circlepath")
+                                .font(Theme.F.jp(13, .medium)).foregroundStyle(Theme.C.text2)
+                                .padding(.horizontal, 12).frame(minHeight: 34)
+                                .background(Theme.C.surface, in: Capsule())
+                                .overlay(Capsule().stroke(Theme.C.border))
+                        }
                     }
                     searchField
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -74,6 +81,7 @@ struct RadioView: View {
                     .refreshable { await load() }
                 }
             }
+            .navigationDestination(isPresented: $showSearch) { RadioSearchView(stations: catalog?.stations ?? []) }
             .navigationDestination(for: RadioStation.self) { s in
                 if let client { RadioStationView(station: s, client: client) }
             }

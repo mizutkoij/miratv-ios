@@ -120,14 +120,29 @@ struct UsenetPlayerView: View {
                 } else {
                     mode = .unavailable("この番組は暗号化された .\(ext ?? "") で投稿されているため、ストリーム再生できません（2026-09-18 より前の投稿）")
                 }
-            case "mp4", "m4v", "mov":
-                playMP4(item, resume: resume)
+            case let e where Self.avVideoMIME[e] != nil:
+                playMP4(item, resume: resume, mime: Self.avVideoMIME[e]!)
+            case let e where Self.avAudioMIME[e] != nil:
+                // 音声だけのファイル（ラジオの録音: m4a / 生の aac / mp3 …）。画面は映像なしで再生する
+                playMP4(item, resume: resume, mime: Self.avAudioMIME[e]!)
             default:
-                // ts / m2ts / 分からないとき（libavformat が中身を見て判断する）
+                // ts / m2ts / mkv / avi / webm / flv / wmv / mpg / ogg / opus / 分からないとき。
+                // 自前のエンジンは libavformat なので、中身を見て判断できるものは何でも開ける
                 playTS(item, resume: resume)
             }
         }
     }
+
+    /// iOS 標準のプレイヤー（AVPlayer）に任せる拡張子と、URL に拡張子が無いので教える中身の種類。
+    /// 標準で開けなかったものは、自前のエンジン（libavformat）に切り替える
+    private static let avVideoMIME: [String: String] = ["mp4": "video/mp4", "m4v": "video/x-m4v", "mov": "video/quicktime"]
+    private static let avAudioMIME: [String: String] = [
+        "m4a": "audio/mp4", "aac": "audio/aac", "adts": "audio/aac", "mp3": "audio/mpeg",
+        "wav": "audio/wav", "flac": "audio/flac", "caf": "audio/x-caf",
+    ]
+
+    /// 標準のプレイヤーで開けなかった item（自前のエンジンに切り替えたもの）
+    @State private var avFellBack: Set<String> = []
 
     /// 本体の拡張子。一度調べたものは覚えておく。調べられなければ nil
     private func mainExt(of item: NzbItemRaw) async -> String? {
@@ -151,13 +166,13 @@ struct UsenetPlayerView: View {
         engine.play(url: client.streamURL(id: item.id), file: true)
     }
 
-    private func playMP4(_ item: NzbItemRaw, resume: Double?) {
+    private func playMP4(_ item: NzbItemRaw, resume: Double?, mime: String = "video/mp4") {
         mode = .mp4
         engine.stop()
         resumeAt = nil      // TS から切り替わったとき、TS 用の待ちが残ると閉じるときに位置を保存しなくなる
         // /api/stream/<id> には拡張子が無いので、AVPlayer に中身の種類を教える
         let asset = AVURLAsset(url: client.streamURL(id: item.id),
-                               options: [AVURLAssetOverrideMIMETypeKey: "video/mp4"])
+                               options: [AVURLAssetOverrideMIMETypeKey: mime])
         let p = AVPlayer(playerItem: AVPlayerItem(asset: asset))
         avPlayer = p
         mp4Paused = false
@@ -218,8 +233,15 @@ struct UsenetPlayerView: View {
     private func onClockTick() {
         if mode == .mp4, let item = avPlayer?.currentItem, item.status == .failed {
             let msg = item.error.map { describeError($0) } ?? "再生できませんでした"
-            DebugLog.log("nzb", "mp4 の再生に失敗 id=\(current?.id ?? "?"): \(msg)")
+            DebugLog.log("nzb", "標準プレイヤーでの再生に失敗 id=\(current?.id ?? "?"): \(msg)")
             avPlayer?.pause(); avPlayer = nil
+            // 標準のプレイヤーが対応していない中身（HEVC の一部・AC-3 の音声・変則の mp4 など）は、自前のエンジンで開き直す
+            if let cur = current, !avFellBack.contains(cur.id) {
+                avFellBack.insert(cur.id)
+                showToast("標準のプレイヤーで開けないので、別の方法で再生します")
+                playTS(cur, resume: resumeAt ?? resumedFrom)
+                return
+            }
             if let next = untriedAlternates.first {
                 showToast("読み込めなかったので、再投稿で再生します")
                 open(next, resume: resumedFrom)

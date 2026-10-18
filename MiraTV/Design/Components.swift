@@ -5,6 +5,8 @@ import SwiftUI
 enum Defaults {
     static let mirakurunURL = "http://192.0.2.10:36192"
     static let radioWebURL = "http://192.0.2.20:8090"
+    /// VPS2 の radio-search（server/radio-search。radiko.db の約 50 万件の過去番組を全文検索）
+    static let radioSearchURL = "http://192.0.2.20:8091"
     static let epgstationURL = "http://192.0.2.10:8888"
     /// homeserver の CM 検出サービス（録画の無音位置から CM ブロックを推定）
     static let chapterURL = "http://192.0.2.10:23235"

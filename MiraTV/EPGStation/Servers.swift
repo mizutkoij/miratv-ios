@@ -11,6 +11,8 @@ enum Servers {
 
     static var chapters: ChapterClient? { ChapterClient(string("chapterURL", Defaults.chapterURL)) }
 
+    static var radioSearch: RadioSearchClient? { RadioSearchClient(string("radioSearchURL", Defaults.radioSearchURL)) }
+
     /// 自前の中継（streamd）。未設定なら nil（音声のみは Mirakurun の原画質ストリームから映像を捨てる方式になる）
     static var streamd: URL? {
         let s = string("streamdURL", Defaults.streamdURL).trimmingCharacters(in: .whitespacesAndNewlines)
