@@ -59,6 +59,20 @@ struct RadioStation: Decodable, Identifiable, Hashable {
     var key: String { "\(source.rawValue):\(id)" }
 }
 
+extension RadioStation {
+    /// radiko で配信されている NHK（NHKラジオ第1（東京）= JOAK など）
+    var isRadikoNHK: Bool { source == .radiko && name.hasPrefix("NHK") }
+
+    /// NHK 専用の nzb アーカイブ（全国放送の録音。地域では分かれない）の検索キー。NHK 以外は nil
+    var nhkArchiveKey: String? {
+        if source == .nhk {
+            return archiveStation?.value ?? "nhk:" + ((band ?? "").lowercased() == "r1" ? "R1" : "FM")
+        }
+        guard isRadikoNHK else { return nil }
+        return name.contains("FM") ? "nhk:FM" : "nhk:R1"
+    }
+}
+
 struct RadioCatalog: Decodable {
     /// サーバー側のキー名は "radiko" だが全ソース混在
     let stations: [RadioStation]

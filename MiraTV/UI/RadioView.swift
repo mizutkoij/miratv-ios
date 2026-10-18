@@ -22,8 +22,12 @@ struct RadioView: View {
 
     private var visible: [RadioStation] {
         guard let catalog else { return [] }
+        // NHK は radiko 経由（番組表・聴き逃し付き）と NHK 直接（ライブのみ）の 2 通りで載っている。
+        // 同じ名前なら radiko 側の 1 行にまとめる（過去は NHK 専用アーカイブにも引き継ぐ）
+        let radikoNHK = Set(catalog.stations.filter(\.isRadikoNHK).map(\.name))
         return catalog.stations.filter { s in
-            (region == nil || s.region == region)
+            !(s.source == .nhk && radikoNHK.contains(s.name))
+            && (region == nil || s.region == region)
             && (query.isEmpty || s.name.localizedCaseInsensitiveContains(query))
         }
     }
@@ -153,7 +157,7 @@ struct RadioStationView: View {
     private var archiveStart: Date {
         // NHK は専用の取り込みが始まった 2026-09-08 ごろから（それ以前は数日に 1 件だけ）
         var c = DateComponents(); c.year = 2026
-        if station.source == .nhk { c.month = 9; c.day = 8 } else { c.month = 7; c.day = 13 }
+        if station.nhkArchiveKey != nil { c.month = 9; c.day = 8 } else { c.month = 7; c.day = 13 }
         return Calendar.current.date(from: c) ?? Date.distantPast
     }
 
@@ -217,7 +221,7 @@ struct RadioStationView: View {
                 DatePicker("日付", selection: $picked, in: archiveStart...Date(), displayedComponents: .date)
                     .datePickerStyle(.graphical)
                     .environment(\.locale, Locale(identifier: "ja_JP"))
-                Text(station.source == .nhk ? "NHK のアーカイブは 2026年9月8日 以降です"
+                Text(station.nhkArchiveKey != nil ? "NHK のアーカイブ（全国放送分）は 2026年9月8日 以降です。直近 7 日は radiko の聴き逃しです"
                                             : "再生できるアーカイブは 2026年7月13日 以降です（それ以前は一覧に出ても、元の nzb が失われていて再生できません）")
                     .font(Theme.F.caption).foregroundStyle(Theme.C.text3)
                     .padding(.horizontal, 16)
@@ -339,6 +343,10 @@ struct RadioStationView: View {
     private func load() async {
         guard hasSchedule else { return }
         if station.source == .nhk { await loadNHK(); return }
+        // radiko の NHK は、聴き逃しの窓（7 日）より前は NHK 専用の nzb アーカイブから引く
+        if station.isRadikoNHK, day <= Calendar.current.startOfDay(for: Date()).addingTimeInterval(-7 * 86400) {
+            await loadNHK(); return
+        }
         // 放送日は 05:00 区切り。0〜5 時の「昨日」はまだ放送中なので取り直す
         let broadcastToday = Calendar.current.startOfDay(for: Date().addingTimeInterval(-5 * 3600))
         let isPast = day < broadcastToday
@@ -365,8 +373,7 @@ extension RadioStationView {
     /// NHK は radiko の聴き逃しが使えない（radiko 側が禁止）ので、録音済みの回だけを日付で引いて並べる。
     /// 番組表は無いので、録音がある回だけが行になる
     fileprivate func loadNHK() async {
-        let key = station.archiveStation?.value
-            ?? "nhk:" + ((station.band ?? "").lowercased() == "r1" ? "R1" : "FM")
+        let key = station.nhkArchiveKey ?? "nhk:R1"
         items = []
         loading = true; defer { loading = false }
         do {
