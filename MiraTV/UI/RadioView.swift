@@ -145,13 +145,23 @@ struct RadioStationView: View {
     @State private var items: [RadioScheduleItem] = []
     @State private var loading = false
     @State private var errorText: String?
+    @State private var showPicker = false
+    @State private var picked = Date()
+
+    /// nzb アーカイブは 2026-05-13 ごろから（実測: それ以前は全局 0 件。5/19 は全局で欠落）
+    private var archiveStart: Date {
+        // NHK は専用の取り込みが始まった 2026-09-08 ごろから（それ以前は数日に 1 件だけ）
+        var c = DateComponents(); c.year = 2026
+        if station.source == .nhk { c.month = 9; c.day = 8 } else { c.month = 5; c.day = 13 }
+        return Calendar.current.date(from: c) ?? Date.distantPast
+    }
 
     private var days: [Date] {
         (0..<8).compactMap { Calendar.current.date(byAdding: .day, value: -$0, to: Calendar.current.startOfDay(for: Date())) }
     }
 
-    /// スケジュール API は radiko 前提（NHK は archive/search 経由: 次ステップ）
-    private var hasSchedule: Bool { station.source == .radiko }
+    /// radiko はスケジュール API、NHK は番組表が無いので archive/search（radiru の録音）から行を作る
+    private var hasSchedule: Bool { station.source == .radiko || station.source == .nhk }
 
     private var playingNzb: String? {
         if case .archive(let nzb) = radio.mode { return nzb }
@@ -172,6 +182,9 @@ struct RadioStationView: View {
                                     ForEach(days, id: \.self) { d in
                                         ChipView(label: dayLabel(d), selected: d == day) { day = d }
                                     }
+                                    // 8 日より前（アーカイブの先頭まで）は日付を選んで開く
+                                    if !days.contains(day) { ChipView(label: dayLabel(day), selected: true) { picked = day; showPicker = true } }
+                                    ChipView(label: "それ以前…", selected: false) { picked = day; showPicker = true }
                                 }
                             }
                             Text(loading ? "読み込み中…" : "番組表").font(Theme.F.section).foregroundStyle(Theme.C.text)
@@ -194,6 +207,32 @@ struct RadioStationView: View {
         .toolbar(.hidden, for: .navigationBar)
         .safeAreaInset(edge: .bottom) { RadioMiniPlayer() }
         .task(id: day) { await load() }
+        .sheet(isPresented: $showPicker) { datePickerSheet }
+    }
+
+    private var datePickerSheet: some View {
+        NavigationStack {
+            VStack(spacing: 8) {
+                DatePicker("日付", selection: $picked, in: archiveStart...Date(), displayedComponents: .date)
+                    .datePickerStyle(.graphical)
+                    .environment(\.locale, Locale(identifier: "ja_JP"))
+                Text(station.source == .nhk ? "NHK のアーカイブは 2026年9月8日 以降です"
+                                            : "アーカイブは 2026年5月13日 以降です（5月19日は全局で欠けています）")
+                    .font(Theme.F.caption).foregroundStyle(Theme.C.text3)
+                    .padding(.horizontal, 16)
+                Spacer()
+            }
+            .navigationTitle("日付を選ぶ")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("閉じる") { showPicker = false } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("決定") { day = Calendar.current.startOfDay(for: picked); showPicker = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .preferredColorScheme(.dark)
     }
 
     private var header: some View {
@@ -291,12 +330,14 @@ struct RadioStationView: View {
     private func dayLabel(_ d: Date) -> String {
         if Calendar.current.isDateInToday(d) { return "今日" }
         if Calendar.current.isDateInYesterday(d) { return "昨日" }
-        return d.formatted(.dateTime.month(.defaultDigits).day().weekday(.short))
+        let old = d < Calendar.current.date(byAdding: .day, value: -180, to: Date())!   // 通常は出ないが、年をまたぐ日付に備える
+        return d.formatted(old ? .dateTime.year().month(.defaultDigits).day().weekday(.short) : .dateTime.month(.defaultDigits).day().weekday(.short))
     }
 
     /// 前回取れた番組表があればすぐ出す。過去の日は内容が変わらないので、取り直さない
     private func load() async {
         guard hasSchedule else { return }
+        if station.source == .nhk { await loadNHK(); return }
         // 放送日は 05:00 区切り。0〜5 時の「昨日」はまだ放送中なので取り直す
         let broadcastToday = Calendar.current.startOfDay(for: Date().addingTimeInterval(-5 * 3600))
         let isPast = day < broadcastToday
@@ -316,6 +357,33 @@ struct RadioStationView: View {
         } catch {
             if items.isEmpty { errorText = describeError(error) }
         }
+    }
+}
+
+extension RadioStationView {
+    /// NHK は radiko の聴き逃しが使えない（radiko 側が禁止）ので、録音済みの回だけを日付で引いて並べる。
+    /// 番組表は無いので、録音がある回だけが行になる
+    fileprivate func loadNHK() async {
+        let key = station.archiveStation?.value
+            ?? "nhk:" + ((station.band ?? "").lowercased() == "r1" ? "R1" : "FM")
+        items = []
+        loading = true; defer { loading = false }
+        do {
+            let hits = try await client.archiveSearch(station: key, q: nil, date: day)
+            items = hits.sorted { ($0.onair ?? "") < ($1.onair ?? "") }.map(Self.nhkItem)
+            errorText = nil
+        } catch {
+            errorText = describeError(error)
+        }
+    }
+
+    /// onair は "2026-10-18T23:05:00+09:00"。終了時刻は分からないので to = ft（長さ 0）にしておく。
+    /// 長さ 0 だと RadioPlayer.shouldSkipHead が false になり、radiko 用の頭 25 秒スキップが掛からない（NHK の録音には継ぎ足しが無い）
+    fileprivate static func nhkItem(_ hit: RadioArchiveHit) -> RadioScheduleItem {
+        let o = hit.onair ?? ""
+        let hhmm = o.count >= 16 ? String(o.dropFirst(11).prefix(5)) : "--:--"
+        return RadioScheduleItem(ft: RadioTime(raw: hhmm), to: RadioTime(raw: hhmm), title: hit.title,
+                                 pfm: hit.sub, thumbnail: hit.thumbnail, nzb: hit.nzb)
     }
 }
 

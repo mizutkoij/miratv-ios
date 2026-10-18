@@ -309,6 +309,12 @@ struct RadioTime: Decodable, Hashable {
             ?? ISO8601DateFormatter().date(from: s)
     }
 
+    /// デコードを通さずに作る（NHK の archive/search 結果から番組表の行を組み立てる用）
+    init(raw: String) {
+        self.raw = raw
+        self.date = nil
+    }
+
     private static func fmt(_ f: String) -> DateFormatter {
         let d = DateFormatter()
         d.locale = Locale(identifier: "en_US_POSIX")
