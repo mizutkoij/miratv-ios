@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>再生モード</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&amp;family=Zen+Kaku+Gothic+New:wght@400;500;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#F5A524}a:hover{color:#FFC35C}
+button{font-family:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="position: relative; width: 390px; height: 844px; background: #0D1014; color: #ECEEF1; font-family: 'Zen Kaku Gothic New', sans-serif; overflow: hidden">
+
+  <div style="height: 54px; background: #000"></div>
+  <div style="height: 219px; background: #05070A; display: flex; align-items: center; justify-content: center">
+    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #4A525D">[映像]</span>
+  </div>
+  <div style="position: absolute; inset: 0; background: rgba(0,0,0,0.55)"></div>
+
+  <section aria-label="再生モード" style="position: absolute; left: 0; right: 0; bottom: 0; background: #161A20; border-radius: 22px 22px 0 0; padding: 10px 16px 30px; display: flex; flex-direction: column; gap: 14px">
+    <div style="width: 40px; height: 5px; border-radius: 3px; background: #3A414B; align-self: center"></div>
+    <div style="display: flex; justify-content: space-between; align-items: baseline; padding: 0 4px">
+      <h2 style="margin: 0; font-size: 20px; font-weight: 700">再生モード</h2>
+      <span style="font-size: 12px; color: #9AA3AE">Wi-Fi 接続中</span>
+    </div>
+
+    <div role="radiogroup" aria-label="画質" style="display: flex; flex-direction: column; gap: 8px">
+      <sc-for list="{{modes}}" as="m" hint-placeholder-count="4">
+        <button role="radio" aria-checked="{{m.selected}}" onClick="{{m.pick}}" style="text-align: left; padding: 12px 14px; border-radius: 14px; border: 1.5px solid {{m.border}}; background: {{m.bg}}; color: #ECEEF1; display: flex; gap: 12px; align-items: center">
+          <span aria-hidden="true" style="flex: 0 0 20px; height: 20px; box-sizing: border-box; border-radius: 10px; border: 2px solid {{m.ring}}; display: flex; align-items: center; justify-content: center">
+            <span style="width: 10px; height: 10px; border-radius: 5px; background: {{m.dot}}"></span>
+          </span>
+          <span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px">
+            <span style="display: flex; align-items: center; gap: 8px">
+              <span style="font-size: 15px; font-weight: 700">{{m.name}}</span>
+              <span style="font-size: 10px; font-weight: 700; color: #B4BCC6; border: 1px solid #343B45; border-radius: 4px; padding: 1px 5px">{{m.src}}</span>
+            </span>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #9AA3AE">{{m.spec}}</span>
+            <span style="font-size: 11px; color: #8C95A1">{{m.feat}}</span>
+          </span>
+        </button>
+      </sc-for>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 2px; border-top: 1px solid #262C35; padding-top: 6px">
+      <label style="display: flex; align-items: center; justify-content: space-between; min-height: 44px; padding: 0 4px; font-size: 14px">
+        <span>モバイル回線では自動で省データ</span>
+        <input type="checkbox" checked style="width: 20px; height: 20px; accent-color: {{accent}}">
+      </label>
+      <label style="display: flex; align-items: center; justify-content: space-between; min-height: 44px; padding: 0 4px; font-size: 14px">
+        <span>画面ロック中は音声のみに切替</span>
+        <input type="checkbox" checked style="width: 20px; height: 20px; accent-color: {{accent}}">
+      </label>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#F5A524","options":["#F5A524","#4CC3FF","#FF6B5A","#9B8CFF"]},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { picked: 'orig' };
+  }
+  renderVals() {
+    const accent = this.props.accent ?? '#F5A524';
+    const modes = [
+      { id: 'orig', name: '原画質', src: 'Mirakurun', spec: 'MPEG-2 TS · 1440×1080i · 約15Mbps', feat: '字幕 ◯ ／ データ放送 ◯ ／ 5.1ch ◯' },
+      { id: 'hd', name: '高画質変換', src: 'EPGStation', spec: 'H.264 · 1280×720 · 約3Mbps', feat: '字幕 ◯（字幕を残す設定時） ／ データ放送 ×' },
+      { id: 'sd', name: '省データ', src: 'EPGStation', spec: 'H.264 · 640×360 · 約0.8Mbps', feat: '字幕 ◯（字幕を残す設定時） ／ データ放送 ×' },
+      { id: 'audio', name: '音声のみ', src: 'EPGStation', spec: 'AAC · 2ch · 128kbps', feat: 'ラジオ感覚で。画面オフ・バックグラウンド再生' },
+    ];
+    return {
+      accent,
+      modes: modes.map((m) => {
+        const sel = m.id === this.state.picked;
+        return {
+          ...m,
+          selected: sel,
+          pick: () => this.setState({ picked: m.id }),
+          border: sel ? accent : '#262C35',
+          bg: sel ? '#1F1C15' : '#13171C',
+          ring: sel ? accent : '#5A6370',
+          dot: sel ? accent : 'transparent',
+        };
+      }),
+    };
+  }
+}
+</script>
+</body>
+</html>

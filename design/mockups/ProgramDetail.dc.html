@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>番組詳細・録画予約</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&amp;family=Zen+Kaku+Gothic+New:wght@400;500;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#F5A524}a:hover{color:#FFC35C}
+button{font-family:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="position: relative; width: 390px; height: 844px; background: #0D1014; color: #ECEEF1; font-family: 'Zen Kaku Gothic New', sans-serif; overflow: hidden">
+  <div style="position: absolute; inset: 0; background: #0D1014"></div>
+  <div style="position: absolute; inset: 0; background: rgba(0,0,0,0.55)"></div>
+
+  <section aria-label="番組詳細" style="position: absolute; left: 0; right: 0; bottom: 0; top: 150px; background: #161A20; border-radius: 22px 22px 0 0; padding: 10px 20px 30px; display: flex; flex-direction: column; gap: 14px">
+    <div style="width: 40px; height: 5px; border-radius: 3px; background: #3A414B; align-self: center"></div>
+
+    <div style="display: flex; align-items: center; gap: 10px">
+      <span aria-hidden="true" style="flex: 0 0 48px; height: 27px; border-radius: 4px; background: #E9ECEF; color: #5A6370; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-size: 8px; font-weight: 600; letter-spacing: 0.06em">LOGO</span>
+      <span style="font-size: 13px; color: #9AA3AE"><span style="font-family: 'IBM Plex Mono', monospace; font-weight: 600; color: #ECEEF1">4</span> 日テレ</span>
+      <a href="Guide.dc.html" aria-label="閉じる" style="margin-left: auto; width: 36px; height: 36px; border-radius: 18px; background: #222831; color: #ECEEF1; display: flex; align-items: center; justify-content: center">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+      </a>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 6px">
+      <h2 style="margin: 0; font-size: 22px; font-weight: 700; line-height: 1.35">[映画]</h2>
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #B4BCC6">10/16(金) 21:00–22:54 · 114分</span>
+      <div style="display: flex; gap: 6px; flex-wrap: wrap">
+        <span style="font-size: 11px; color: #B4BCC6; border: 1px solid #343B45; border-radius: 4px; padding: 1px 6px">映画/邦画</span>
+        <span style="font-size: 11px; color: #B4BCC6; border: 1px solid #343B45; border-radius: 4px; padding: 1px 6px">字</span>
+        <span style="font-size: 11px; color: #B4BCC6; border: 1px solid #343B45; border-radius: 4px; padding: 1px 6px">デ</span>
+      </div>
+    </div>
+
+    <sc-if value="{{reserved}}" hint-placeholder-val="{{ false }}">
+      <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px; background: #2A1615; border: 1px solid #5A2A26">
+        <span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 5px; background: #FF5A4E"></span>
+        <span style="font-size: 13px; font-weight: 700">録画予約済み</span>
+        <span style="font-size: 12px; color: #C9B3B1; margin-left: auto">チューナー 2 · TS保存</span>
+      </div>
+    </sc-if>
+
+    <div style="display: flex; gap: 10px; padding: 10px 12px; border-radius: 12px; background: #2A2213; border: 1px solid #5C4718">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F5C04A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 18px; margin-top: 1px"><path d="M12 3l9.5 17h-19z"></path><path d="M12 10v4M12 17.5v.5"></path></svg>
+      <span style="font-size: 12px; line-height: 1.6; color: #E5D6B5">同時刻に予約が2件あります。チューナーが足りないため競合する可能性があります</span>
+    </div>
+
+    <p style="margin: 0; font-size: 13px; line-height: 1.7; color: #B4BCC6">[番組概要：EPGStation の schedules から取得した description / extended を表示]</p>
+
+    <div style="margin-top: auto; display: flex; flex-direction: column; gap: 10px">
+      <button onClick="{{toggle}}" style="height: 52px; border-radius: 14px; border: {{btnBorder}}; background: {{btnBg}}; color: {{btnFg}}; font-size: 16px; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 8px">
+        <span aria-hidden="true" style="width: 12px; height: 12px; border-radius: 6px; background: {{dot}}"></span>
+        <span>{{btnLabel}}</span>
+      </button>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px">
+        <button style="height: 48px; border-radius: 14px; border: 1px solid #343B45; background: #1D222A; color: #ECEEF1; font-size: 14px; font-weight: 700">毎週録画ルール</button>
+        <button style="height: 48px; border-radius: 14px; border: 1px solid #343B45; background: #1D222A; color: #ECEEF1; font-size: 14px; font-weight: 700">録画オプション</button>
+      </div>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { reserved: false };
+  }
+  renderVals() {
+    const r = this.state.reserved;
+    return {
+      reserved: r,
+      toggle: () => this.setState({ reserved: !r }),
+      btnLabel: r ? '予約を取り消す' : '録画予約',
+      btnBg: r ? 'transparent' : '#FF5A4E',
+      btnFg: r ? '#FF8A80' : '#1F0705',
+      btnBorder: r ? '1.5px solid #5A2A26' : 'none',
+      dot: r ? 'transparent' : '#1F0705',
+    };
+  }
+}
+</script>
+</body>
+</html>

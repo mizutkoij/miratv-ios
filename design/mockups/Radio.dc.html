@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>ラジオ</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&amp;family=Zen+Kaku+Gothic+New:wght@400;500;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#F5A524}a:hover{color:#FFC35C}
+button{font-family:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 390px; height: 844px; box-sizing: border-box; background: #0D1014; color: #ECEEF1; font-family: 'Zen Kaku Gothic New', sans-serif; display: flex; flex-direction: column; overflow: hidden">
+
+  <header style="padding: 58px 20px 10px; display: flex; flex-direction: column; gap: 12px">
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <h1 style="margin: 0; font-size: 28px; font-weight: 700">ラジオ</h1>
+      <div style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: #9AA3AE">
+        <span style="width: 7px; height: 7px; border-radius: 50%; background: #3DD68C"></span>
+        <span>radio-web · 219 局が再生可</span>
+      </div>
+    </div>
+    <label style="display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; border-radius: 12px; background: #161A20; color: #8C95A1; font-size: 14px">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="M16 16l4.5 4.5"></path></svg>
+      <input type="search" placeholder="局名で検索" style="flex: 1; border: none; background: transparent; color: #ECEEF1; font-family: inherit; font-size: 14px; outline: none">
+    </label>
+    <div style="display: flex; gap: 6px; overflow: hidden">
+      <sc-for list="{{regions}}" as="r" hint-placeholder-count="5">
+        <button onClick="{{r.pick}}" style="flex: 0 0 auto; height: 32px; padding: 0 12px; border-radius: 16px; border: {{r.border}}; background: {{r.bg}}; color: {{r.fg}}; font-size: 13px; font-weight: 700">{{r.label}}</button>
+      </sc-for>
+    </div>
+  </header>
+
+  <ul style="list-style: none; margin: 0; padding: 4px 12px 8px; display: flex; flex-direction: column; gap: 6px; flex: 1; overflow: hidden">
+    <sc-for list="{{stations}}" as="s" hint-placeholder-count="6">
+      <li>
+        <a href="RadioStation.dc.html" style="text-decoration: none; color: inherit; display: flex; gap: 12px; align-items: center; padding: 10px 12px; border-radius: 14px; background: {{s.bg}}; border: 1px solid {{s.border}}">
+          <span aria-hidden="true" style="flex: 0 0 64px; height: 32px; border-radius: 6px; background: #E9ECEF; color: #5A6370; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 600; letter-spacing: 0.06em">LOGO</span>
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px">
+            <div style="display: flex; align-items: center; gap: 6px">
+              <span style="font-size: 15px; font-weight: 700; white-space: nowrap">{{s.name}}</span>
+              <span style="font-size: 10px; font-weight: 700; color: #B4BCC6; border: 1px solid #343B45; border-radius: 4px; padding: 0 5px">{{s.src}}</span>
+            </div>
+            <span style="font-size: 12px; color: #9AA3AE; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{s.now}}</span>
+          </div>
+          <span style="font-size: 11px; font-weight: 700; color: {{s.badgeFg}}">{{s.badge}}</span>
+        </a>
+      </li>
+    </sc-for>
+  </ul>
+
+  <div style="margin: 0 8px 8px; padding: 10px 12px; border-radius: 16px; background: #1D222A; border: 1px solid #2A3038; display: flex; align-items: center; gap: 12px">
+    <span aria-hidden="true" style="flex: 0 0 40px; height: 40px; border-radius: 8px; background: #E9ECEF; color: #5A6370; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-size: 7px; font-weight: 600">ART</span>
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px">
+      <span style="font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">[朝のワイド番組]</span>
+      <span style="font-size: 12px; color: #9AA3AE">[局名] · <span style="color: #FF8A80; font-weight: 700">LIVE</span></span>
+    </div>
+    <button aria-label="一時停止" style="width: 44px; height: 44px; border-radius: 22px; border: none; background: {{accent}}; color: #1A1205; display: flex; align-items: center; justify-content: center">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"></rect><rect x="14" y="5" width="4" height="14" rx="1"></rect></svg>
+    </button>
+  </div>
+
+  <nav aria-label="メイン" style="display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); padding: 8px 8px 30px; border-top: 1px solid #1E232B; background: #0D1014">
+    <a href="Main.dc.html" style="text-decoration: none; color: #8C95A1; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; font-size: 10px; font-weight: 500">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="18" height="13" rx="2.5"></rect><path d="M8 3l4 3 4-3"></path></svg>
+      <span>テレビ</span>
+    </a>
+    <a href="Guide.dc.html" style="text-decoration: none; color: #8C95A1; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; font-size: 10px; font-weight: 500">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"></rect><path d="M3 9h18M9 9v11M15 9v11"></path></svg>
+      <span>番組表</span>
+    </a>
+    <a href="Radio.dc.html" style="text-decoration: none; color: {{accent}}; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; font-size: 10px; font-weight: 700">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3" y="9" width="18" height="11" rx="2.5"></rect><path d="M7 9l10-5"></path><circle cx="15.5" cy="14.5" r="2.5"></circle><path d="M6.5 13h4M6.5 16h4"></path></svg>
+      <span>ラジオ</span>
+    </a>
+    <a href="Recordings.dc.html" style="text-decoration: none; color: #8C95A1; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; font-size: 10px; font-weight: 500">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><circle cx="12" cy="12" r="3.5" fill="currentColor"></circle></svg>
+      <span>録画</span>
+    </a>
+    <a href="#" style="text-decoration: none; color: #8C95A1; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; font-size: 10px; font-weight: 500">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"></path></svg>
+      <span>設定</span>
+    </a>
+  </nav>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#F5A524","options":["#F5A524","#4CC3FF","#FF6B5A","#9B8CFF"]},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { region: '関東' };
+  }
+  renderVals() {
+    const accent = this.props.accent ?? '#F5A524';
+    const regions = ['すべて', '関東', '関西', '東海', '北海道', '九州'];
+    const stations = [
+      { name: '[局名 A]', src: 'radiko', now: '[朝のワイド番組] · [出演者]', badge: 'アーカイブ', ok: true, playing: true },
+      { name: 'NHK ラジオ第1', src: 'NHK', now: '[ニュース]', badge: 'アーカイブ', ok: true },
+      { name: 'NHK-FM', src: 'NHK', now: '[クラシック番組]', badge: 'アーカイブ', ok: true },
+      { name: '[局名 B]', src: 'radiko', now: '[音楽番組] · [DJ]', badge: 'アーカイブ', ok: true },
+      { name: '[コミュニティFM]', src: 'ListenRadio', now: '[地域情報]', badge: 'ライブ', ok: true },
+      { name: '[コミュニティFM]', src: 'FMぷらぷら', now: 'Ogg 配信 · 対応予定', badge: '未対応', ok: false },
+    ];
+    return {
+      accent,
+      regions: regions.map((r) => {
+        const sel = r === this.state.region;
+        return { label: r, pick: () => this.setState({ region: r }),
+          bg: sel ? accent : '#161A20', fg: sel ? '#1A1205' : '#B4BCC6', border: sel ? 'none' : '1px solid #262C35' };
+      }),
+      stations: stations.map((s) => ({
+        ...s,
+        bg: s.playing ? '#1A1F27' : '#13171C',
+        border: s.playing ? '#3A3220' : '#1C2128',
+        badgeFg: s.ok ? (s.badge === 'アーカイブ' ? accent : '#9AA3AE') : '#6B7480',
+      })),
+    };
+  }
+}
+</script>
+</body>
+</html>

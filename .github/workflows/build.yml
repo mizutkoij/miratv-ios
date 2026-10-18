@@ -1,0 +1,43 @@
+name: build
+# macOS runners bill at 10x on the free plan (2,000 min -> ~200 min/month), so this only
+# runs when started by hand (Actions tab -> build -> Run workflow), never on push.
+on:
+  workflow_dispatch:
+
+jobs:
+  device-build:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable   # FFmpegKit needs swift-tools 6.1 (Xcode 16.3+)
+      - run: brew install xcodegen
+      - run: xcodegen
+      # FFmpegKit ships large binary xcframeworks; cache them so reruns are cheap
+      - uses: actions/cache@v4
+        with:
+          path: SourcePackages
+          key: spm-${{ hashFiles('project.yml') }}
+      - name: Build (iOS device, unsigned) -- also catches Swift compile errors
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project MiraTV.xcodeproj -scheme MiraTV \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath dd -clonedSourcePackagesDirPath SourcePackages \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee build.log | tail -n 150
+      - name: Package unsigned ipa
+        run: |
+          mkdir -p Payload && cp -R dd/Build/Products/Debug-iphoneos/MiraTV.app Payload/
+          zip -qr MiraTV-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MiraTV-unsigned-ipa
+          path: MiraTV-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: build.log

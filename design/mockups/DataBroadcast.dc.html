@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>データ放送＋リモコン</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&amp;family=Zen+Kaku+Gothic+New:wght@400;500;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#F5A524}a:hover{color:#FFC35C}
+button{font-family:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width: 390px; height: 844px; box-sizing: border-box; background: #0D1014; color: #ECEEF1; font-family: 'Zen Kaku Gothic New', sans-serif; display: flex; flex-direction: column; overflow: hidden">
+
+  <div style="height: 54px; background: #000"></div>
+
+  <section aria-label="データ放送画面" style="position: relative; width: 390px; height: 219px; background: #1B2E4A; display: grid; grid-template-columns: 196px 1fr; grid-template-rows: 1fr 26px; gap: 6px; padding: 8px; box-sizing: border-box">
+    <div style="background: #05070A; border-radius: 3px; display: flex; align-items: center; justify-content: center">
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: #4A525D">[縮小映像]</span>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <div style="background: #F2F4F7; color: #14243B; font-size: 11px; font-weight: 700; padding: 5px 7px; border-radius: 3px">ニュース</div>
+      <div style="background: #FFE45C; color: #14243B; font-size: 11px; font-weight: 700; padding: 5px 7px; border-radius: 3px">天気 ▶</div>
+      <div style="background: #F2F4F7; color: #14243B; font-size: 11px; font-weight: 700; padding: 5px 7px; border-radius: 3px">番組情報</div>
+      <div style="background: #F2F4F7; color: #14243B; font-size: 11px; font-weight: 700; padding: 5px 7px; border-radius: 3px">交通</div>
+    </div>
+    <div style="grid-column: 1 / span 2; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px">
+      <span style="background: #2F6BFF; color: #fff; font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; border-radius: 3px">[青]</span>
+      <span style="background: #E8443A; color: #fff; font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; border-radius: 3px">[赤]</span>
+      <span style="background: #1E9E57; color: #fff; font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; border-radius: 3px">[緑]</span>
+      <span style="background: #E8C21A; color: #14243B; font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; border-radius: 3px">[黄]</span>
+    </div>
+    <span style="position: absolute; right: 8px; top: -22px; font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: #5A6370">web-bml 960×540</span>
+  </section>
+
+  <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; border-bottom: 1px solid #1E232B">
+    <div style="display: flex; flex-direction: column; gap: 2px">
+      <span style="font-size: 13px; color: #9AA3AE">5 テレビ朝日 · データ放送</span>
+      <span style="font-size: 12px; color: #8C95A1">最後の入力 <span style="font-family: 'IBM Plex Mono', monospace; color: {{accent}}; font-weight: 600">{{lastKey}}</span></span>
+    </div>
+    <a href="Player.dc.html" style="text-decoration: none; height: 36px; padding: 0 14px; border-radius: 18px; border: 1px solid #262C35; background: #161A20; color: #ECEEF1; display: flex; align-items: center; font-size: 13px; font-weight: 700">データ終了</a>
+  </div>
+
+  <section aria-label="リモコン" style="flex: 1; padding: 16px 24px 30px; display: flex; flex-direction: column; gap: 18px">
+
+    <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px">
+      <sc-for list="{{colors}}" as="c" hint-placeholder-count="4">
+        <button aria-label="{{c.label}}" onClick="{{c.press}}" style="height: 44px; border-radius: 12px; border: none; background: {{c.bg}}; color: {{c.fg}}; font-size: 13px; font-weight: 700">{{c.label}}</button>
+      </sc-for>
+    </div>
+
+    <div style="display: flex; align-items: center; justify-content: space-between">
+      <div style="display: flex; flex-direction: column; gap: 10px">
+        <button onClick="{{pressBack}}" style="width: 72px; height: 44px; border-radius: 12px; border: 1px solid #262C35; background: #161A20; color: #ECEEF1; font-size: 13px; font-weight: 700">戻る</button>
+        <button onClick="{{pressD}}" aria-label="dボタン" style="width: 72px; height: 44px; border-radius: 12px; border: 1px solid {{accent}}; background: #161A20; color: {{accent}}; font-family: 'IBM Plex Mono', monospace; font-size: 18px; font-weight: 600">d</button>
+      </div>
+
+      <div style="position: relative; width: 176px; height: 176px; border-radius: 88px; background: #161A20; border: 1px solid #262C35">
+        <button aria-label="上" onClick="{{pressUp}}" style="position: absolute; left: 64px; top: 4px; width: 48px; height: 48px; border: none; background: transparent; color: #ECEEF1; display: flex; align-items: center; justify-content: center">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 15l6-6 6 6"></path></svg>
+        </button>
+        <button aria-label="下" onClick="{{pressDown}}" style="position: absolute; left: 64px; bottom: 4px; width: 48px; height: 48px; border: none; background: transparent; color: #ECEEF1; display: flex; align-items: center; justify-content: center">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>
+        </button>
+        <button aria-label="左" onClick="{{pressLeft}}" style="position: absolute; top: 64px; left: 4px; width: 48px; height: 48px; border: none; background: transparent; color: #ECEEF1; display: flex; align-items: center; justify-content: center">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"></path></svg>
+        </button>
+        <button aria-label="右" onClick="{{pressRight}}" style="position: absolute; top: 64px; right: 4px; width: 48px; height: 48px; border: none; background: transparent; color: #ECEEF1; display: flex; align-items: center; justify-content: center">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M9 6l6 6-6 6"></path></svg>
+        </button>
+        <button onClick="{{pressEnter}}" style="position: absolute; left: 54px; top: 54px; width: 68px; height: 68px; border-radius: 34px; border: none; background: {{accent}}; color: #1A1205; font-size: 14px; font-weight: 700">決定</button>
+      </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px">
+      <sc-for list="{{nums}}" as="n" hint-placeholder-count="12">
+        <button onClick="{{n.press}}" style="height: 44px; border-radius: 10px; border: 1px solid #262C35; background: #13171C; color: #ECEEF1; font-family: 'IBM Plex Mono', monospace; font-size: 16px; font-weight: 600">{{n.label}}</button>
+      </sc-for>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#F5A524","options":["#F5A524","#4CC3FF","#FF6B5A","#9B8CFF"]},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { lastKey: '—' };
+  }
+  renderVals() {
+    const press = (k) => () => this.setState({ lastKey: k });
+    const colors = [
+      { label: '青', bg: '#2F6BFF', fg: '#FFFFFF' },
+      { label: '赤', bg: '#E0392F', fg: '#FFFFFF' },
+      { label: '緑', bg: '#178A4B', fg: '#FFFFFF' },
+      { label: '黄', bg: '#E8C21A', fg: '#14243B' },
+    ];
+    return {
+      accent: this.props.accent ?? '#F5A524',
+      lastKey: this.state.lastKey,
+      colors: colors.map((c) => ({ ...c, press: press(c.label) })),
+      nums: Array.from({ length: 12 }, (_, i) => ({ label: String(i + 1), press: press(String(i + 1)) })),
+      pressUp: press('↑'), pressDown: press('↓'), pressLeft: press('←'), pressRight: press('→'),
+      pressEnter: press('決定'), pressBack: press('戻る'), pressD: press('d'),
+    };
+  }
+}
+</script>
+</body>
+</html>

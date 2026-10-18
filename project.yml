@@ -1,0 +1,55 @@
+name: MiraTV
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+packages:
+  FFmpegKit:
+    url: https://github.com/kingslay/FFmpegKit
+    branch: main
+
+targets:
+  MiraTV:
+    type: application
+    platform: iOS
+    sources:
+      - path: MiraTV
+    dependencies:
+      - package: FFmpegKit
+        product: FFmpegKit
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.miratv
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_BITCODE: NO
+        DEAD_CODE_STRIPPING: YES
+        # 自分の Team ID に変更してください
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_STYLE: Automatic
+    info:
+      path: MiraTV/Info.plist
+      properties:
+        CFBundleDisplayName: MiraTV
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        UIBackgroundModes: [audio]
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSLocalNetworkUsageDescription: 自宅の Mirakurun サーバーに接続してテレビを視聴するために使用します。
+        NSAppTransportSecurity:
+          # Mirakurun は http で、Tailscale の 100.x アドレスはローカル扱いにならないため個人用ビルドでは全許可
+          NSAllowsArbitraryLoads: true
+          # データ放送(web-bml)の WKWebView が http / ws の自前サーバーを読み込めるように
+          NSAllowsArbitraryLoadsInWebContent: true
+          NSAllowsLocalNetworking: true
+          # 全許可が再署名などで効かなかった場合の保険として、実際に使う Tailscale アドレスも個別に許可
+          NSExceptionDomains:
+            "192.0.2.10":
+              NSExceptionAllowsInsecureHTTPLoads: true
+            "192.0.2.20":
+              NSExceptionAllowsInsecureHTTPLoads: true

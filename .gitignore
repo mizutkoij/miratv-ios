@@ -1,0 +1,5 @@
+MiraTV.xcodeproj/
+.DS_Store
+xcuserdata/
+DerivedData/
+.swiftpm/

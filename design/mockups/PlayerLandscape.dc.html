@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>再生（横・全画面）</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&amp;family=Zen+Kaku+Gothic+New:wght@400;500;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#F5A524}a:hover{color:#FFC35C}
+button{font-family:inherit}
+</style>
+</helmet>
+<div style="position: relative; width: 844px; height: 390px; background: #05070A; color: #ECEEF1; font-family: 'Zen Kaku Gothic New', sans-serif; overflow: hidden">
+
+  <div style="position: absolute; left: 75px; top: 0; width: 694px; height: 390px; display: flex; align-items: center; justify-content: center; background: #080A0E">
+    <span style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #4A525D">[映像 16:9 · 694×390]</span>
+  </div>
+
+  <div style="position: absolute; left: 0; right: 0; bottom: {{capBottom}}; display: flex; justify-content: center">
+    <p style="margin: 0; padding: 4px 14px; background: rgba(0,0,0,0.72); color: #fff; font-size: 20px; font-weight: 500; line-height: 1.45; text-align: center">（解説）字幕は操作パネルを避けて上に逃げる</p>
+  </div>
+
+  <sc-if value="{{controls}}" hint-placeholder-val="{{ true }}">
+    <div style="position: absolute; left: 0; right: 0; top: 0; padding: 14px 52px 22px; display: flex; align-items: center; gap: 14px; background: rgba(5,7,10,0.62)">
+      <a href="Player.dc.html" aria-label="縦表示に戻る" style="width: 44px; height: 44px; border-radius: 22px; background: rgba(255,255,255,0.1); color: #fff; display: flex; align-items: center; justify-content: center">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"></path></svg>
+      </a>
+      <span aria-hidden="true" style="flex: 0 0 64px; height: 36px; border-radius: 6px; background: #E9ECEF; color: #5A6370; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 600; letter-spacing: 0.06em">LOGO</span>
+      <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0">
+        <span style="font-size: 13px; color: #B4BCC6"><span style="font-family: 'IBM Plex Mono', monospace; font-weight: 600; color: {{accent}}">5</span> テレビ朝日</span>
+        <span style="font-size: 17px; font-weight: 700">[プロ野球中継]</span>
+      </div>
+      <div style="margin-left: auto; display: flex; gap: 8px">
+        <button aria-label="字幕" style="height: 40px; padding: 0 12px; border-radius: 20px; border: none; background: {{accent}}; color: #1A1205; font-size: 13px; font-weight: 700">字幕</button>
+        <button aria-label="音声切替" style="height: 40px; padding: 0 12px; border-radius: 20px; border: none; background: rgba(255,255,255,0.12); color: #fff; font-size: 13px; font-weight: 700">主音声</button>
+        <a href="DataBroadcast.dc.html" aria-label="データ放送" style="text-decoration: none; width: 40px; height: 40px; border-radius: 20px; background: rgba(255,255,255,0.12); color: #fff; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-size: 16px; font-weight: 600">d</a>
+        <button aria-label="ピクチャ・イン・ピクチャ" style="width: 40px; height: 40px; border-radius: 20px; border: none; background: rgba(255,255,255,0.12); color: #fff; display: flex; align-items: center; justify-content: center">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2.5"></rect><rect x="12" y="11" width="6" height="5" rx="1"></rect></svg>
+        </button>
+      </div>
+    </div>
+
+    <div style="position: absolute; right: 18px; top: 135px; display: flex; flex-direction: column; gap: 8px">
+      <button aria-label="次のチャンネル" style="width: 44px; height: 56px; border-radius: 14px; border: none; background: rgba(5,7,10,0.62); color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 10px">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 15l6-6 6 6"></path></svg>
+        <span>6</span>
+      </button>
+      <button aria-label="前のチャンネル" style="width: 44px; height: 56px; border-radius: 14px; border: none; background: rgba(5,7,10,0.62); color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 10px">
+        <span>4</span>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>
+      </button>
+    </div>
+
+    <div style="position: absolute; left: 0; right: 0; bottom: 0; padding: 14px 52px 18px; display: flex; align-items: center; gap: 12px; background: rgba(5,7,10,0.62)">
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #B4BCC6">18:00</span>
+      <div style="flex: 1; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.18); overflow: hidden"><div style="height: 4px; width: 22%; background: {{accent}}"></div></div>
+      <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #B4BCC6">20:54</span>
+      <span style="font-size: 11px; color: #1A1205; background: #3DD68C; border-radius: 4px; padding: 2px 6px; font-weight: 700">LIVE</span>
+    </div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#F5A524","options":["#F5A524","#4CC3FF","#FF6B5A","#9B8CFF"]},"controls":{"editor":"boolean","default":true},"$preview":{"width":844,"height":390}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const controls = this.props.controls ?? true;
+    return {
+      accent: this.props.accent ?? '#F5A524',
+      controls,
+      capBottom: controls ? '76px' : '24px',
+    };
+  }
+}
+</script>
+</body>
+</html>

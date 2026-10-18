@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>チャンネル一覧</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&amp;family=Zen+Kaku+Gothic+New:wght@400;500;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#F5A524}a:hover{color:#FFC35C}
+button{font-family:inherit}
+</style>
+</helmet>
+<div style="width: 390px; height: 844px; box-sizing: border-box; background: #0D1014; color: #ECEEF1; font-family: 'Zen Kaku Gothic New', sans-serif; display: flex; flex-direction: column; overflow: hidden">
+
+  <header style="padding: 58px 20px 12px; display: flex; flex-direction: column; gap: 16px">
+    <div style="display: flex; align-items: center; justify-content: space-between">
+      <div style="display: flex; flex-direction: column; gap: 4px">
+        <h1 style="margin: 0; font-size: 28px; font-weight: 700; letter-spacing: 0.02em">チャンネル</h1>
+        <div style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: #9AA3AE">
+          <span style="width: 7px; height: 7px; border-radius: 50%; background: #3DD68C"></span>
+          <span>自宅 Mirakurun · チューナー 2/4 空き</span>
+        </div>
+      </div>
+      <button aria-label="サーバー設定" style="width: 44px; height: 44px; border-radius: 22px; border: 1px solid #262C35; background: #161A20; color: #ECEEF1; display: flex; align-items: center; justify-content: center">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14M5 6h14M5 18h14"></path><circle cx="9" cy="6" r="2" fill="#161A20"></circle><circle cx="15" cy="12" r="2" fill="#161A20"></circle><circle cx="8" cy="18" r="2" fill="#161A20"></circle></svg>
+      </button>
+    </div>
+
+    <div role="tablist" aria-label="放送波" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 4px; background: #161A20; border-radius: 12px">
+      <button role="tab" aria-selected="true" style="height: 36px; border: none; border-radius: 9px; background: {{accent}}; color: #1A1205; font-size: 14px; font-weight: 700">地上波</button>
+      <button role="tab" aria-selected="false" style="height: 36px; border: none; border-radius: 9px; background: transparent; color: #B4BCC6; font-size: 14px; font-weight: 500">BS</button>
+      <button role="tab" aria-selected="false" style="height: 36px; border: none; border-radius: 9px; background: transparent; color: #B4BCC6; font-size: 14px; font-weight: 500">CS</button>
+    </div>
+  </header>
+
+  <ul style="list-style: none; margin: 0; padding: 4px 12px 12px; display: flex; flex-direction: column; gap: 6px; flex: 1; overflow: hidden">
+    <sc-for list="{{channels}}" as="ch" hint-placeholder-count="7">
+      <li>
+        <a href="Player.dc.html" style="text-decoration: none; color: inherit; display: flex; gap: 14px; align-items: stretch; padding: 12px; border-radius: 14px; background: {{ch.bg}}; border: 1px solid {{ch.border}}">
+          <div style="width: 64px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px">
+            <div aria-hidden="true" style="width: 64px; height: 36px; box-sizing: border-box; border-radius: 6px; background: {{logoBg}}; border: 1px solid {{logoBorder}}; display: flex; align-items: center; justify-content: center; font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 600; color: {{logoFg}}; letter-spacing: 0.06em">LOGO</div>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; font-weight: 600; color: #B4BCC6">{{ch.key}}ch</span>
+          </div>
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px">
+            <div style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px">
+              <span style="font-size: 13px; color: #9AA3AE; font-weight: 500">{{ch.name}}</span>
+              <span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #8C95A1">{{ch.time}}</span>
+            </div>
+            <span style="font-size: 15px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{ch.title}}</span>
+            <div style="height: 3px; border-radius: 2px; background: #262C35; overflow: hidden">
+              <div style="height: 3px; width: {{ch.progress}}; background: {{accent}}"></div>
+            </div>
+            <span style="font-size: 12px; color: #8C95A1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">次 {{ch.next}}</span>
+          </div>
+        </a>
+      </li>
+    </sc-for>
+  </ul>
+
+  <nav aria-label="メイン" style="display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); padding: 8px 8px 30px; border-top: 1px solid #1E232B; background: #0D1014">
+    <a href="Main.dc.html" style="text-decoration: none; color: {{accent}}; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; font-size: 11px; font-weight: 700">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="18" height="13" rx="2.5"></rect><path d="M8 3l4 3 4-3"></path></svg>
+      <span>チャンネル</span>
+    </a>
+    <a href="Guide.dc.html" style="text-decoration: none; color: #8C95A1; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; font-size: 11px; font-weight: 500">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"></rect><path d="M3 9h18M9 9v11M15 9v11"></path></svg>
+      <span>番組表</span>
+    </a>
+    <a href="Radio.dc.html" style="text-decoration: none; color: #8C95A1; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; font-size: 11px; font-weight: 500">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="3" y="9" width="18" height="11" rx="2.5"></rect><path d="M7 9l10-5"></path><circle cx="15.5" cy="14.5" r="2.5"></circle><path d="M6.5 13h4M6.5 16h4"></path></svg>
+      <span>ラジオ</span>
+    </a>
+    <a href="Recordings.dc.html" style="text-decoration: none; color: #8C95A1; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; font-size: 11px; font-weight: 500">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><circle cx="12" cy="12" r="3.5" fill="currentColor"></circle></svg>
+      <span>録画</span>
+    </a>
+    <a href="#" style="text-decoration: none; color: #8C95A1; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; font-size: 11px; font-weight: 500">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"></path></svg>
+      <span>設定</span>
+    </a>
+  </nav>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#F5A524","options":["#F5A524","#4CC3FF","#FF6B5A","#9B8CFF"]},"logoTile":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const rows = [
+      { key: '1', sid: '1024', name: 'NHK総合', title: '[ニュース番組]', time: '18:00–18:45', progress: '72%', next: '18:45 [気象情報]' },
+      { key: '2', sid: '1032', name: 'NHK Eテレ', title: '[教育番組]', time: '18:25–18:50', progress: '40%', next: '18:50 [アニメ]' },
+      { key: '4', sid: '1040', name: '日テレ', title: '[夕方ニュース]', time: '17:50–19:00', progress: '58%', next: '19:00 [バラエティ]' },
+      { key: '5', sid: '1064', name: 'テレビ朝日', title: '[プロ野球中継]', time: '18:00–20:54', progress: '22%', next: '20:54 [報道番組]' },
+      { key: '6', sid: '1048', name: 'TBS', title: '[情報番組]', time: '17:50–19:00', progress: '58%', next: '19:00 [ドラマ]' },
+      { key: '7', sid: '1072', name: 'テレビ東京', title: '[ドキュメンタリー]', time: '18:30–19:00', progress: '15%', next: '19:00 [旅番組]' },
+      { key: '8', sid: '1056', name: 'フジテレビ', title: '[夕方ニュース]', time: '18:00–19:00', progress: '50%', next: '19:00 [クイズ]' },
+    ];
+    const light = (this.props.logoTile ?? 'light') === 'light';
+    return {
+      accent: this.props.accent ?? '#F5A524',
+      logoBg: light ? '#E9ECEF' : '#1D222A',
+      logoBorder: light ? '#E9ECEF' : '#2A3038',
+      logoFg: light ? '#5A6370' : '#6B7480',
+      channels: rows.map((r, i) => ({
+        ...r,
+        bg: i === 3 ? '#1A1F27' : '#13171C',
+        border: i === 3 ? '#3A3220' : '#1C2128',
+      })),
+    };
+  }
+}
+</script>
+</body>
+</html>

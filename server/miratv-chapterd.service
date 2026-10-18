@@ -1,0 +1,20 @@
+[Unit]
+Description=MiraTV CM detection (silence-based chapters), on demand only
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/homeserver/miratv-chapterd/chapterd.py
+Environment=HOST=192.0.2.10
+Environment=PORT=23235
+Environment=RECORDED_DIR=/home/homeserver/recorded
+Environment=FFMPEG=/home/homeserver/epgstation_downloader/ffmpeg
+# recording machine: never compete with recpt1/Mirakurun
+Nice=19
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+MemoryMax=256M
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
