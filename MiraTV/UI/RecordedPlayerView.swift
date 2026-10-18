@@ -26,6 +26,12 @@ struct RecordedPlayerView: View {
     @State private var cmStatus = ""
     /// 自動スキップしたブロックの開始。同じブロックで繰り返さない（自分で戻ったときに飛ばされ続けないように）
     @State private var autoSkipped: Double?
+    /// いま読んでいる TS の URL（homeserver の直接配信、または EPGStation）
+    @State private var tsSource: URL?
+    /// 直接配信で再生を始めたが、まだ一度も再生に入っていない（ここで失敗したら EPGStation に切り替える）
+    @State private var directPending = false
+    /// 「もう一度」で開き直したとき、シークできるようになったらこの位置へ戻す
+    @State private var resumeAt: Double?
 
     private static let speeds: [Double] = [0.75, 1.0, 1.25, 1.5, 2.0]
 
@@ -65,6 +71,10 @@ struct RecordedPlayerView: View {
         .onAppear { start() }
         .task { await loadChapters() }
         .onChange(of: engine.position) { _, _ in autoSkipIfNeeded() }
+        .onChange(of: engine.state) { _, s in handleStateChange(s) }
+        .onChange(of: engine.isSeekable) { _, ok in
+            if ok, let t = resumeAt { resumeAt = nil; engine.seek(to: t) }
+        }
         .onDisappear {
             engine.stop()
             avPlayer?.pause()
@@ -85,17 +95,37 @@ struct RecordedPlayerView: View {
             p.play()
         } else {
             engine.durationHint = recorded.durationSeconds    // libavformat が長さを出せなかったときの代わり
-            // 元の TS は EPGStation（Node）を通さず、homeserver のファイルを直接読む。使えなければ従来どおり EPGStation
-            Task { @MainActor in
-                var src = url
-                if let name = file.filename, let c = Servers.chapters, await c.rawAvailable(filename: name) {
-                    src = c.rawURL(filename: name)
-                    DebugLog.log("rec", "直接再生 \(name)")
-                } else {
-                    DebugLog.log("rec", "EPGStation 経由で再生（直接配信は使えません）")
-                }
-                engine.play(url: src, file: true)
+            // 元の TS は EPGStation（Node）を通さず、homeserver のファイルを直接読む。
+            // 使えるかを先に HEAD で確かめると毎回最大 4 秒待つので、使える前提でいきなり開き、
+            // 再生に入る前に失敗したときだけ EPGStation に切り替える
+            let src: URL
+            if let name = file.filename, let c = Servers.chapters {
+                directPending = true
+                src = c.rawURL(filename: name)
+                DebugLog.log("rec", "直接再生 id=\(file.id) \(name)")
+            } else {
+                directPending = false
+                src = url
+                DebugLog.log("rec", "EPGStation 経由で再生 id=\(file.id)（直接配信の設定なし）")
             }
+            tsSource = src
+            engine.play(url: src, file: true)
+        }
+    }
+
+    private func handleStateChange(_ s: PlayerEngine.State) {
+        switch s {
+        case .playing:
+            directPending = false
+        case .failed(let msg):
+            guard directPending, let file else { return }
+            directPending = false
+            let fallback = es.videoURL(fileId: file.id)
+            DebugLog.log("rec", "直接再生に失敗、EPGStation に切り替え: \(msg)")
+            tsSource = fallback
+            engine.play(url: fallback, file: true)
+        default:
+            break
         }
     }
 
@@ -211,7 +241,11 @@ struct RecordedPlayerView: View {
         case .failed(let msg):
             VStack(spacing: 10) {
                 Text(msg).multilineTextAlignment(.center).font(Theme.F.caption).foregroundStyle(Theme.C.text)
-                Button("もう一度") { engine.play(url: es.videoURL(fileId: file?.id ?? 0), file: true) }
+                Button("もう一度") {
+                    let pos = engine.position
+                    engine.play(url: tsSource ?? es.videoURL(fileId: file?.id ?? 0), file: true)
+                    if pos > 5 { resumeAt = pos }
+                }
                     .buttonStyle(.borderedProminent).tint(Theme.C.accent)
             }
             .padding()

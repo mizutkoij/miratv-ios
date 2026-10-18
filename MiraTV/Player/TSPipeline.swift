@@ -151,14 +151,25 @@ final class TSPipeline {
 
     // MARK: - Main loop
 
-    private func run() throws {
-        guard let ctx = avformat_alloc_context() else { throw PipelineError("avformat_alloc_context failed") }
-        self.fmt = ctx
+    /// 受信を別スレッドで先読みする（FFmpeg の async: プロトコル、4MB ≒ 地デジ 2 秒ぶん）。
+    /// デコードと受信を切り離して、回線の揺れで映像・音声が途切れにくくする。使えないビルドなら通常の http で開き直す
+    static var useReadAhead = true
+    /// このビルドの FFmpeg に async: プロトコルが入っているか（1 回だけ調べる）
+    private static let hasAsyncProtocol: Bool = {
+        let ok = avio_find_protocol_name("async:http://example.invalid/") != nil
+        DebugLog.log("player", "先読み(async:) \(ok ? "使用" : "このビルドに無いため不使用")")
+        return ok
+    }()
+
+    /// avformat_open_input は失敗すると渡した AVFormatContext を解放するので、開き直すたびに作り直す
+    private func openInput(_ urlString: String) -> Int32 {
+        guard let ctx = avformat_alloc_context() else { return -12 }   // ENOMEM
         ctx.pointee.interrupt_callback.callback = { opaque in
             guard let opaque else { return 0 }
             return Unmanaged<TSPipeline>.fromOpaque(opaque).takeUnretainedValue().stopRequested ? 1 : 0
         }
         ctx.pointee.interrupt_callback.opaque = Unmanaged.passUnretained(self).toOpaque()
+        self.fmt = ctx
 
         var opts: OpaquePointer?
         av_dict_set(&opts, "probesize", "2000000", 0)
@@ -166,8 +177,21 @@ final class TSPipeline {
         av_dict_set(&opts, "rw_timeout", "15000000", 0)        // µs, http
         av_dict_set(&opts, "user_agent", "MiraTV/0.1", 0)
         av_dict_set(&opts, "headers", "X-Mirakurun-Priority: 0\r\n", 0)
-        var r = avformat_open_input(&self.fmt, url.absoluteString, nil, &opts)
+        let r = avformat_open_input(&self.fmt, urlString, nil, &opts)
         av_dict_free(&opts)
+        return r
+    }
+
+    private func run() throws {
+        let plain = url.absoluteString
+        var r: Int32
+        // 開けなかったときに http で開き直すと、サーバーが落ちているだけでも待ち時間が 2 倍になるので、
+        // async: が使えるかは事前に 1 回だけ判定し、開き直しはしない
+        if Self.useReadAhead && Self.hasAsyncProtocol && (url.scheme == "http" || url.scheme == "https") {
+            r = openInput("async:" + plain)
+        } else {
+            r = openInput(plain)
+        }
         guard r >= 0, let fmt = self.fmt else { throw PipelineError("ストリームを開けません", r) }
 
         r = avformat_find_stream_info(fmt, nil)

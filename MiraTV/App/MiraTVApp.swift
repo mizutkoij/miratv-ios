@@ -11,6 +11,7 @@ struct MiraTVApp: App {
 
     init() {
         DebugLog.start()
+        DispatchQueue.global(qos: .utility).async { DiskCache.prune() }
         // バックグラウンドやサイレントスイッチ ON でも音を出す
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
 

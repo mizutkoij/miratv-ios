@@ -29,21 +29,23 @@ struct MirakurunClient {
         baseURL = url
     }
 
+    private var servicesCacheKey: String { "mirakurun-services-\(baseURL.host ?? "")-\(baseURL.port ?? 0)" }
+
     func services() async throws -> [MirakurunService] {
         var req = URLRequest(url: baseURL.appending(path: "api/services"))
-        req.timeoutInterval = 30
-        let (data, res) = try await Net.data(req)
+        req.timeoutInterval = 30   // Tailscale が中継(DERP)経由だと遅いので長めに
+        let (data, res) = try await Net.data(for: req)
         if let http = res as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw URLError(.badServerResponse)
         }
         let list = try JSONDecoder().decode([MirakurunService].self, from: data)
-        Net.store(data, key: "mirakurun-services")
+        DiskCache.save(data, key: servicesCacheKey)
         return list
     }
 
-    /// 前回取れた局一覧（放送局の構成はほぼ変わらないので、起動直後はこれを先に出す）
-    static func cachedServices() -> [MirakurunService]? {
-        Net.storedValue([MirakurunService].self, key: "mirakurun-services", maxAge: 90 * 86400)
+    /// 前回取れた局一覧（起動直後にすぐ出す用）
+    func cachedServices() -> [MirakurunService]? {
+        DiskCache.decode([MirakurunService].self, key: servicesCacheKey)
     }
 
     /// サービス単位の TS ストリーム。decode=1 で Mirakurun 側のデコーダ設定を使う
@@ -66,7 +68,7 @@ struct MirakurunClient {
                         URLQueryItem(name: "serviceId", value: String(service.serviceId))]
         var req = URLRequest(url: c.url!)
         req.timeoutInterval = 45
-        let (data, res) = try await Net.data(req)
+        let (data, res) = try await Net.data(for: req, retries: 1)
         if let http = res as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw URLError(.badServerResponse)
         }

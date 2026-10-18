@@ -44,9 +44,15 @@ struct ChannelListView: View {
         }
     }
 
+    /// 前回の一覧を出したまま、取り直しに失敗した
+    @State private var refreshFailed = false
+    /// いま持っている一覧がどのサーバーのものか（接続先を変えたら前のサーバーの一覧を残さない）
+    @State private var servicesFrom: String?
+
     private var statusText: String {
         if let errorText { return errorText }
         if loading && services.isEmpty { return "接続中…" }
+        if refreshFailed { return "Mirakurun · 前回の一覧を表示中（更新できませんでした）" }
         let host = client?.baseURL.host ?? "-"
         let hidden = services.filter { $0.isTV && bandOf($0) == band }.count - items(in: band).count
         let hiddenText = hidden > 0 ? "（放送なし \(hidden) 局は非表示）" : ""
@@ -60,7 +66,7 @@ struct ChannelListView: View {
                 ScreenHeader(title: "チャンネル",
                              status: StatusLine(text: statusText,
                                                 color: errorText == nil ? Theme.C.live : Theme.C.rec)) {
-                    CircleButton(systemName: "arrow.clockwise") { Task { await load() } }
+                    CircleButton(systemName: "arrow.clockwise") { Task { await load(manual: true) } }
                 }
                 SegmentedPills(options: Self.bands, label: label, selection: $band)
                     .padding(.horizontal, 12)
@@ -76,7 +82,7 @@ struct ChannelListView: View {
                     .padding(.horizontal, 12)
                     .padding(.bottom, 16)
                 }
-                .refreshable { await load() }
+                .refreshable { await load(manual: true) }
             }
         }
         .task(id: serverURL) { await load() }
@@ -126,17 +132,30 @@ struct ChannelListView: View {
         }
     }
 
-    private func load() async {
+    /// 前回の一覧があればすぐ出して、裏で取り直す。番組の概要は epgURL の task が取るので、
+    /// 起動時はここで取らない（以前は起動のたびに 2 回取っていた）。手動の更新のときだけ一緒に取り直す
+    private func load(manual: Bool = false) async {
         guard let client else { errorText = "URL が不正です"; return }
-        if services.isEmpty, let c = MirakurunClient.cachedServices() { services = c }   // 前回の局一覧を先に出す
-        loading = services.isEmpty
+        if servicesFrom != serverURL {
+            services = client.cachedServices() ?? []
+            servicesFrom = serverURL
+            refreshFailed = false
+        }
+        epg.restoreFromDisk()
+        loading = true
         defer { loading = false }
         do {
             services = try await client.services()
             errorText = nil
-            await epg.refreshOverview(es: Servers.epgstation, force: true)
+            refreshFailed = false
+            if manual { await epg.refreshOverview(es: Servers.epgstation, force: true) }
         } catch {
-            if services.isEmpty { errorText = "取得に失敗: \(describeError(error))" }
+            if services.isEmpty {
+                errorText = "取得に失敗: \(describeError(error))"
+            } else {
+                refreshFailed = true
+                DebugLog.log("net", "局一覧の更新に失敗（前回の一覧で続行）: \(describeError(error))")
+            }
         }
     }
 }

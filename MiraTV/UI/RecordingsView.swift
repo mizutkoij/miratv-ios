@@ -232,7 +232,6 @@ struct RecordingsView: View {
 
     private func load(force: Bool) async {
         guard let es else { errorText = "EPGStation の URL が設定されていません"; return }
-        if recorded.isEmpty, let c = EPGStationClient.cachedRecorded() { recorded = c.records; recordedTotal = c.total }   // 前回の一覧を先に出す
         loading = true
         defer { loading = false }
         await epg.refreshOverview(es: es)

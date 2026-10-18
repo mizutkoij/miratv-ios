@@ -220,28 +220,37 @@ struct GuideView: View {
 
     // MARK: - 読み込み
 
+    private static func sorted(_ list: [ESSchedule]) -> [ESSchedule] {
+        list.sorted { ($0.channel.remoteControlKeyId ?? 999, $0.channel.serviceId ?? 0)
+                    < ($1.channel.remoteControlKeyId ?? 999, $1.channel.serviceId ?? 0) }
+    }
+
+    /// このセッションで取れたものはそのまま使う。端末に前回の分があればまずそれを出し、裏で取り直す
+    /// （番組表は 1 日 1MB 前後あり、毎回待つと「接続中」が長い）
     private func load() async {
         let start = windowStart
         let key = "\(band)-\(Int(start.timeIntervalSince1970))"
         if let c = cache[key] { columns = c; errorText = nil; return }
-        guard let es = Servers.epgstation else { errorText = "EPGStation の URL が設定されていません"; return }
-        let types = band == "CS" ? ["CS", "SKY"] : [band]
-        // 前回取った番組表があれば先に出して、裏で取り直す
-        if columns.isEmpty, let old = EPGStationClient.cachedSchedules(from: start, types: types) {
-            columns = old.sorted { ($0.channel.remoteControlKeyId ?? 999, $0.channel.serviceId ?? 0)
-                                 < ($1.channel.remoteControlKeyId ?? 999, $1.channel.serviceId ?? 0) }
+        let diskKey = "guide-" + key
+        var showingStale = false
+        if let saved = EPGStationClient.cachedSchedules(key: diskKey), !saved.isEmpty {
+            columns = Self.sorted(saved)
+            errorText = nil
+            showingStale = true
         }
-        loading = columns.isEmpty
+        guard let es = Servers.epgstation else { errorText = "EPGStation の URL が設定されていません"; return }
+        loading = true
         defer { loading = false }
         do {
-            var list = try await es.schedules(from: start, to: start.addingTimeInterval(86400), types: types)
-            list.sort { ($0.channel.remoteControlKeyId ?? 999, $0.channel.serviceId ?? 0)
-                      < ($1.channel.remoteControlKeyId ?? 999, $1.channel.serviceId ?? 0) }
+            let list = Self.sorted(try await es.schedules(from: start, to: start.addingTimeInterval(86400),
+                                                          types: band == "CS" ? ["CS", "SKY"] : [band],
+                                                          cacheKey: diskKey))
             cache[key] = list
             columns = list
             errorText = nil
         } catch {
-            if columns.isEmpty { errorText = describeError(error) }
+            if !showingStale { errorText = describeError(error) }
+            DebugLog.log("net", "番組表の取得に失敗\(showingStale ? "（前回の分で表示中）" : ""): \(describeError(error))")
         }
     }
 }

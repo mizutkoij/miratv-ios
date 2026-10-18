@@ -97,8 +97,13 @@ struct PlayerView: View {
         }
         .task {
             guard let es = Servers.epgstation else { return }
-            loadingModes = true
-            hlsNames = (try? await es.liveHLSModes().names) ?? []
+            // 変換のプリセットはサーバーの設定ファイルで決まっていて、まず変わらない。前回の分をすぐ使い、裏で取り直す
+            let savedKey = "hlsModeNames"
+            if let saved = UserDefaults.standard.stringArray(forKey: savedKey) { hlsNames = saved } else { loadingModes = true }
+            if let names = try? await es.liveHLSModes().names {
+                hlsNames = names
+                UserDefaults.standard.set(names, forKey: savedKey)
+            }
             loadingModes = false
             // モバイル回線で自動省データが有効なら、最も軽い HLS に切り替える
             if autoLowData, network.isExpensive, !hlsNames.isEmpty, modeID == -1 {

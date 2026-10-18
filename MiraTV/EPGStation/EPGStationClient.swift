@@ -152,31 +152,29 @@ struct EPGStationClient {
         return c.url!
     }
 
+    /// GET は一時的な失敗なら取り直す。POST / DELETE（予約の追加・削除）は二重に送らないよう 1 回だけ
     private func send(_ req: URLRequest) async throws -> Data {
-        let (data, res) = try await Net.data(req)
+        let (data, res) = try await Net.data(for: req, retries: (req.httpMethod ?? "GET") == "GET" ? 2 : 0)
         if let http = res as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw ESError.http(http.statusCode, String(data: data.prefix(160), encoding: .utf8) ?? "")
         }
         return data
     }
 
+    /// cacheKey を渡すと、取れた生データを端末に保存する（次回 `cached` ですぐ出せる）
     private func get<T: Decodable>(_ path: String, _ query: [String: String] = [:], timeout: TimeInterval = 30,
                                    cacheKey: String? = nil) async throws -> T {
         var req = URLRequest(url: url(path, query))
         req.timeoutInterval = timeout
         let data = try await send(req)
         let value = try JSONDecoder().decode(T.self, from: data)
-        if let cacheKey { Net.store(data, key: cacheKey) }   // 復号できたものだけ保存する
+        if let cacheKey { DiskCache.save(data, key: cacheKey) }
         return value
     }
 
-    private static func scheduleKey(_ from: Date, _ types: [String]) -> String {
-        "es-schedules-\(types.joined(separator: "+"))-\(Int(from.timeIntervalSince1970))"
-    }
-
-    /// 前回取れた番組表（同じ帯・同じ開始時刻）。番組表は放送後に変わりにくいので 3 日まで使う
-    static func cachedSchedules(from: Date, types: [String]) -> [ESSchedule]? {
-        Net.storedValue([LossyDecodable<ESSchedule>].self, key: scheduleKey(from, types), maxAge: 3 * 86400)?.compactMap(\.value)
+    /// `schedules(..., cacheKey:)` で保存した番組表
+    static func cachedSchedules(key: String) -> [ESSchedule]? {
+        DiskCache.decode([LossyDecodable<ESSchedule>].self, key: key)?.compactMap(\.value)
     }
 
     private static func ms(_ d: Date) -> String { String(Int64(d.timeIntervalSince1970 * 1000)) }
@@ -184,12 +182,12 @@ struct EPGStationClient {
     // MARK: 番組表
 
     /// 期間内の番組表（全局）。2 時間で約 560KB・0.5 秒、24 時間で約 4MB（全波）
-    func schedules(from: Date, to: Date, types: [String] = ["GR", "BS", "CS", "SKY"]) async throws -> [ESSchedule] {
+    func schedules(from: Date, to: Date, types: [String] = ["GR", "BS", "CS", "SKY"],
+                   cacheKey: String? = nil) async throws -> [ESSchedule] {
         var q: [String: String] = ["startAt": Self.ms(from), "endAt": Self.ms(to), "isHalfWidth": "true",
                                    "GR": "false", "BS": "false", "CS": "false", "SKY": "false"]
         for t in types { q[t] = "true" }
-        let list: [LossyDecodable<ESSchedule>] = try await get("api/schedules", q, timeout: 60,
-                                                               cacheKey: Self.scheduleKey(from, types))
+        let list: [LossyDecodable<ESSchedule>] = try await get("api/schedules", q, timeout: 60, cacheKey: cacheKey)
         return list.compactMap(\.value)
     }
 
@@ -273,20 +271,11 @@ struct EPGStationClient {
 
     // MARK: 録画・ルール・容量
 
-    /// 前回取れた録画一覧の先頭ページ
-    static func cachedRecorded() -> (records: [ESRecorded], total: Int)? {
-        struct R: Decodable { let records: [LossyDecodable<ESRecorded>]; let total: Int? }
-        guard let r = Net.storedValue(R.self, key: "es-recorded-first", maxAge: 30 * 86400) else { return nil }
-        let recs = r.records.compactMap(\.value)
-        return (recs, r.total ?? recs.count)
-    }
-
     func recorded(offset: Int = 0, limit: Int = 30) async throws -> (records: [ESRecorded], total: Int) {
         struct R: Decodable { let records: [LossyDecodable<ESRecorded>]; let total: Int? }
         // isReverse=true は「古い順」（実測）。新しい順にしたいので指定しない
         let r: R = try await get("api/recorded", ["isHalfWidth": "true",
-                                                   "offset": String(offset), "limit": String(limit)],
-                                 cacheKey: offset == 0 ? "es-recorded-first" : nil)
+                                                   "offset": String(offset), "limit": String(limit)])
         let recs = r.records.compactMap(\.value)
         return (recs, r.total ?? recs.count)
     }

@@ -37,13 +37,7 @@ struct LogoTile: View {
             .fill(Theme.C.logoTile)
             .frame(width: size.width, height: size.height)
             .overlay {
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image {
-                        image.resizable().scaledToFit().padding(2)
-                    } else {
-                        Color.clear
-                    }
-                }
+                CachedImage(url: url).padding(2)
             }
     }
 }

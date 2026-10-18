@@ -57,6 +57,15 @@ final class RadioPlayer: ObservableObject {
     private static let stitchTolerance: Double = 10
     private var archiveRetried = false
 
+    // ライブの自動再接続。radio-web の中継（radiko 認証・セグメント取得）や Tailscale の経路切替で
+    // 1 回目が落ちることが多く、手で「再試行」すると直るため、同じことを自動でやる
+    private var liveStation: RadioStation?
+    private var liveRetries = 0
+    private static let maxLiveRetries = 4
+    private var stallCheck: Task<Void, Never>?
+    /// 再接続を予約済み（1 回の失敗で .failed と failedToPlayToEndTime が両方来ても、1 回分だけ数える）
+    private var retryPending = false
+
     init() {
         player.automaticallyWaitsToMinimizeStalling = true
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] t in
@@ -71,7 +80,10 @@ final class RadioPlayer: ObservableObject {
             .sink { [weak self] status in
                 guard let self else { return }
                 switch status {
-                case .playing: self.phase = .playing
+                case .playing:
+                    self.phase = .playing
+                    self.liveRetries = 0
+                    self.stallCheck?.cancel()
                 case .waitingToPlayAtSpecifiedRate:
                     if case .preparing = self.phase { break }
                     self.phase = .buffering
@@ -91,7 +103,14 @@ final class RadioPlayer: ObservableObject {
     // MARK: - Live
 
     func playLive(_ station: RadioStation) {
+        liveRetries = 0
+        startLive(station)
+    }
+
+    private func startLive(_ station: RadioStation) {
         guard let resolver else { return }
+        retryPending = false
+        liveStation = station
         start(mode: .live(stationKey: station.key))
         now = NowInfo(stationName: station.name,
                       title: station.current?.title ?? "",
@@ -101,10 +120,33 @@ final class RadioPlayer: ObservableObject {
             do {
                 switch try await resolver.resolveLive(station) {
                 case .avPlayer(let url): self.load(url, startAt: nil)
-                case .ffmpeg: throw RadioWebError.unsupported("この局（Ogg 配信）は次のステップで対応します")
-                case .unsupported(let why): throw RadioWebError.unsupported(why)
+                case .ffmpeg: self.fail(RadioWebError.unsupported("この局（Ogg 配信）は次のステップで対応します"))
+                case .unsupported(let why): self.fail(RadioWebError.unsupported(why))
                 }
-            } catch { self.fail(error) }
+            } catch { self.retryLiveOrFail(error) }
+        }
+    }
+
+    /// ライブが落ちたら、間隔をあけて取り直す（1, 2, 3, 4 秒）。それでも駄目ならエラー表示
+    private func retryLiveOrFail(_ error: Error?) {
+        guard !(error is CancellationError) else { return }
+        if retryPending { return }
+        guard case .live(let key) = mode, let station = liveStation, station.key == key,
+              liveRetries < Self.maxLiveRetries else {
+            fail(error ?? URLError(.cannotLoadFromNetwork)); return
+        }
+        liveRetries += 1
+        retryPending = true
+        let attempt = liveRetries
+        DebugLog.log("radio", "ライブ再接続 \(attempt)/\(Self.maxLiveRetries) \(station.name): \(error.map(describeError) ?? "停止")")
+        phase = .buffering
+        loadTask?.cancel()
+        loadTask = Task {
+            try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+            guard !Task.isCancelled, case .live(let k) = self.mode, k == key else { return }
+            let keep = self.liveRetries
+            self.startLive(station)
+            self.liveRetries = keep
         }
     }
 
@@ -158,6 +200,9 @@ final class RadioPlayer: ObservableObject {
 
     func stop() {
         loadTask?.cancel()
+        stallCheck?.cancel()
+        retryPending = false
+        liveStation = nil
         player.replaceCurrentItem(with: nil)
         itemBag.removeAll()
         mode = .idle; phase = .idle; position = 0; duration = 0
@@ -168,6 +213,7 @@ final class RadioPlayer: ObservableObject {
 
     private func start(mode: Mode) {
         loadTask?.cancel()
+        stallCheck?.cancel()
         player.pause()
         player.replaceCurrentItem(with: nil)
         itemBag.removeAll()
@@ -199,7 +245,32 @@ final class RadioPlayer: ObservableObject {
 
         NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification, object: item)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.advanceArchive() }
+            .sink { [weak self] _ in
+                guard let self else { return }
+                if case .live = self.mode { self.retryLiveOrFail(nil) } else { self.advanceArchive() }
+            }
+            .store(in: &itemBag)
+
+        NotificationCenter.default.publisher(for: AVPlayerItem.failedToPlayToEndTimeNotification, object: item)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] n in
+                self?.handleItemFailure(n.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)
+            }
+            .store(in: &itemBag)
+
+        // ライブが止まったまま 8 秒戻らなければ、つなぎ直す（HLS のプレイリスト更新が途切れたときなど）
+        NotificationCenter.default.publisher(for: AVPlayerItem.playbackStalledNotification, object: item)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self, case .live = self.mode else { return }
+                self.stallCheck?.cancel()
+                self.stallCheck = Task {
+                    try? await Task.sleep(nanoseconds: 8_000_000_000)
+                    // 一時停止（ユーザー操作）のときはつなぎ直さない。読み込み待ちのまま止まっているときだけ
+                    guard !Task.isCancelled, self.player.timeControlStatus == .waitingToPlayAtSpecifiedRate else { return }
+                    self.retryLiveOrFail(nil)
+                }
+            }
             .store(in: &itemBag)
 
         player.replaceCurrentItem(with: item)
@@ -217,6 +288,7 @@ final class RadioPlayer: ObservableObject {
 
     /// アーカイブのトークンはサーバー再起動・1 時間無アクセスで失効（404）→ 1 回だけ play を取り直す
     private func handleItemFailure(_ error: Error?) {
+        if case .live = mode { retryLiveOrFail(error); return }
         if case .archive(let nzb) = mode, !archiveRetried {
             archiveRetried = true
             resolveAndLoadArchive(nzb)

@@ -92,14 +92,18 @@ struct RadioView: View {
         .padding(.horizontal, 12)
     }
 
+    /// 前回の局カタログがあればすぐ出して、裏で取り直す（取り直しに失敗しても前回の分で使える）
     private func load() async {
         guard let client else { errorText = "URL が不正です"; return }
         radio.configure(client: client)
-        if catalog == nil, let c = RadioWebClient.cachedStations() { catalog = c }   // 前回の局一覧を先に出す
-        loading = catalog == nil
+        if catalog == nil, let cached = client.cachedStations() { catalog = cached }
+        loading = true
         defer { loading = false }
         do { catalog = try await client.stations(); errorText = nil }
-        catch { if catalog == nil { errorText = "局一覧の取得に失敗: \(describeError(error))" } }   // 前回分が出ていれば、失敗は黙って次回に回す
+        catch {
+            if catalog == nil { errorText = "局一覧の取得に失敗: \(describeError(error))" }
+            DebugLog.log("radio", "局一覧の更新に失敗: \(describeError(error))")
+        }
     }
 }
 
@@ -251,13 +255,28 @@ struct RadioStationView: View {
         return d.formatted(.dateTime.month(.defaultDigits).day().weekday(.short))
     }
 
+    /// 前回取れた番組表があればすぐ出す。過去の日は内容が変わらないので、取り直さない
     private func load() async {
         guard hasSchedule else { return }
+        // 放送日は 05:00 区切り。0〜5 時の「昨日」はまだ放送中なので取り直す
+        let broadcastToday = Calendar.current.startOfDay(for: Date().addingTimeInterval(-5 * 3600))
+        let isPast = day < broadcastToday
+        let key = RadioWebClient.scheduleCacheKey(source: station.source, station: station.id, date: day)
+        if let saved = client.cachedSchedule(source: station.source, station: station.id, date: day) {
+            items = saved.items
+            errorText = nil
+            // 終わった日で、保存から 6 時間以内なら取り直さない（アーカイブは後から増えたり期限で消えたりするため、ずっとは使わない）
+            if isPast, saved.items.contains(where: \.isArchived), (DiskCache.age(key) ?? .infinity) < 6 * 3600 { return }
+        } else {
+            items = []
+        }
         loading = true; defer { loading = false }
         do {
             items = try await client.schedule(source: station.source, station: station.id, date: day).items
             errorText = nil
-        } catch { errorText = describeError(error) }
+        } catch {
+            if items.isEmpty { errorText = describeError(error) }
+        }
     }
 }
 

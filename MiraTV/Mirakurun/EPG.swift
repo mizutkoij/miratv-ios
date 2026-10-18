@@ -154,29 +154,57 @@ final class EPGStore: ObservableObject {
     private var retryAfter: [Int: TimeInterval] = [:]
     private let limiter = FetchLimiter(3)
 
+    private static let overviewCacheKey = "es-overview"
+    private var restored = false
+    /// 概要を最後に取れた時刻（端末から戻した分は保存した時刻）。2 時間より古いと、もう放送中の番組を持っていない
+    private var overviewGoodAt: Date?
+    private var overviewIsStale: Bool {
+        guard let at = overviewGoodAt, !overview.isEmpty else { return true }
+        return Date().timeIntervalSince(at) > 2 * 3600
+    }
+
+    /// 前回の概要（局の顔ぶれ・番組名）を端末から戻す。起動直後に「接続中」で待たせず、局一覧を確定させるため。
+    /// 放送中の判定は時刻で行うので、古い番組は自然に表示から外れる
+    func restoreFromDisk() {
+        guard !restored else { return }
+        restored = true
+        guard overview.isEmpty, let list = EPGStationClient.cachedSchedules(key: Self.overviewCacheKey), !list.isEmpty else { return }
+        apply(list)
+        overviewGoodAt = Date().addingTimeInterval(-(DiskCache.age(Self.overviewCacheKey) ?? 365 * 86400))
+    }
+
+    private func apply(_ list: [ESSchedule]) {
+        var map: [Int: [Program]] = [:]
+        var info: [Int: ESChannel] = [:]
+        for s in list {
+            map[s.channel.id] = s.programs.map(Program.init(es:)).sorted { $0.start < $1.start }
+            info[s.channel.id] = s.channel
+        }
+        overview = map
+        channelInfo = info
+        activeChannelIDs = Set(map.keys)
+    }
+
     /// 全局の概要。10 分ごとに取り直しても重くない大きさだが、一覧の表示のたびには叩かない
     func refreshOverview(es: EPGStationClient?, force: Bool = false) async {
-        guard let es else { overviewFailed = true; return }
+        restoreFromDisk()
+        guard let es else { overviewFailed = overviewIsStale; return }
         if !force, let at = overviewAt, Date().timeIntervalSince(at) < 60 { return }
         overviewAt = Date()
         do {
             let now = Date()
-            let list = try await es.schedules(from: now, to: now.addingTimeInterval(2 * 3600))
-            var map: [Int: [Program]] = [:]
-            var info: [Int: ESChannel] = [:]
-            for s in list {
-                map[s.channel.id] = s.programs.map(Program.init(es:)).sorted { $0.start < $1.start }
-                info[s.channel.id] = s.channel
-            }
-            overview = map
-            channelInfo = info
-            activeChannelIDs = Set(map.keys)
+            let list = try await es.schedules(from: now, to: now.addingTimeInterval(2 * 3600),
+                                              cacheKey: Self.overviewCacheKey)
+            apply(list)
+            overviewGoodAt = Date()
             overviewError = nil
             overviewFailed = false
         } catch {
             overviewAt = nil
             overviewError = describeError(error)
-            overviewFailed = true
+            // 前回の概要がまだ使える（2 時間以内）なら、それで続ける。局ごとに Mirakurun から 0.5MB ずつ取り直す
+            // フォールバック（重い）は、使える概要を何も持っていないときだけ
+            overviewFailed = overviewIsStale
         }
     }
 

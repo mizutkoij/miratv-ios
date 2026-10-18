@@ -155,10 +155,20 @@ struct RadioWebClient {
     }
 
     // 読み取り系
-    func stations() async throws -> RadioCatalog { try await get("api/stations", cacheKey: "radio-stations") }
+    private var stationsCacheKey: String { "radio-stations-\(baseURL.host ?? "")" }
 
-    /// 前回取れた局一覧。局の構成は滅多に変わらないので、画面を開いた瞬間にこれを出す
-    static func cachedStations() -> RadioCatalog? { Net.storedValue(RadioCatalog.self, key: "radio-stations", maxAge: 90 * 86400) }
+    /// 局カタログ（約 350KB）。取れたら端末に保存し、次回は `cachedStations()` ですぐ出す
+    func stations() async throws -> RadioCatalog { try await get("api/stations", cacheKey: stationsCacheKey) }
+
+    func cachedStations() -> RadioCatalog? { DiskCache.decode(RadioCatalog.self, key: stationsCacheKey) }
+
+    static func scheduleCacheKey(source: RadioSource, station: String, date: Date) -> String {
+        "radio-sched-\(source.rawValue)-\(station)-\(dayFormatter.string(from: date))"
+    }
+
+    func cachedSchedule(source: RadioSource, station: String, date: Date) -> RadioSchedule? {
+        DiskCache.decode(RadioSchedule.self, key: Self.scheduleCacheKey(source: source, station: station, date: date))
+    }
 
     func nowPlaying(radikoId: String) async throws -> RadioNowPlaying {
         try await get("api/nowplaying/radiko/\(radikoId)")
@@ -167,7 +177,7 @@ struct RadioWebClient {
     /// 日付は 05:00〜翌 05:00 区切り。過去日もOK（radiko は nzb 付きで返る）
     func schedule(source: RadioSource, station: String, date: Date) async throws -> RadioSchedule {
         try await get("api/station/schedule", ["source": source.rawValue, "station": station, "date": Self.dayFormatter.string(from: date)],
-                      cacheKey: "radio-sched-\(source.rawValue)-\(station)-\(Self.dayFormatter.string(from: date))")
+                      cacheKey: Self.scheduleCacheKey(source: source, station: station, date: date))
     }
 
     /// q / date / region のどれかが必須（空だと results:[]）。radiko はサーバーに実ファイルが残っている回のみ
@@ -189,7 +199,7 @@ struct RadioWebClient {
 
     /// 次の回を裏で準備（fire-and-forget）
     func archivePrefetch(nzb: String) {
-        Task { _ = try? await post("api/archive/prefetch", ["nzb": nzb], timeout: 10) as EmptyResponse }
+        Task { _ = try? await post("api/archive/prefetch", ["nzb": nzb], timeout: 10, retries: 0) as EmptyResponse }
     }
 
     /// トークンの寿命は約 15 秒。再生直前に呼ぶ（Ogg なので AVPlayer では鳴らない → FFmpeg エンジン行き）
@@ -204,28 +214,32 @@ struct RadioWebClient {
 
     private func get<T: Decodable>(_ path: String, _ query: [String: String] = [:], cacheKey: String? = nil) async throws -> T {
         var req = URLRequest(url: url(path, query))
-        req.timeoutInterval = 45   // 1 回の試行は Net が 15 秒で切って再試行する
-        return try await send(req, cacheKey: cacheKey)
+        req.timeoutInterval = 45   // 局一覧は約 350KB。中継経由でも間に合うよう長めに
+        let data = try await sendData(req, retries: 2)
+        let value = try JSONDecoder().decode(T.self, from: data)
+        if let cacheKey { DiskCache.save(data, key: cacheKey) }
+        return value
     }
 
-    private func post<T: Decodable>(_ path: String, _ body: [String: String], timeout: TimeInterval) async throws -> T {
+    /// アーカイブの play は同じ nzb で何度呼んでもサーバー側で同じものを返すので、一時的な失敗なら 1 回だけ送り直す
+    private func post<T: Decodable>(_ path: String, _ body: [String: String], timeout: TimeInterval, retries: Int = 1,
+                                    retryTimeouts: Bool = false) async throws -> T {
         var req = URLRequest(url: url(path))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONEncoder().encode(body)
         req.timeoutInterval = timeout
-        return try await send(req)
+        let data = try await sendData(req, retries: retries, retryTimeouts: retryTimeouts)
+        if T.self == EmptyResponse.self { return EmptyResponse() as! T }
+        return try JSONDecoder().decode(T.self, from: data)
     }
 
-    private func send<T: Decodable>(_ req: URLRequest, cacheKey: String? = nil) async throws -> T {
-        let (data, res) = try await Net.data(req)
+    private func sendData(_ req: URLRequest, retries: Int, retryTimeouts: Bool = true) async throws -> Data {
+        let (data, res) = try await Net.data(for: req, retries: retries, retryTimeouts: retryTimeouts)
         if let http = res as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw RadioWebError.http(http.statusCode)
         }
-        if T.self == EmptyResponse.self { return EmptyResponse() as! T }
-        let value = try JSONDecoder().decode(T.self, from: data)
-        if let cacheKey { Net.store(data, key: cacheKey) }
-        return value
+        return data
     }
 
     static let dayFormatter: DateFormatter = {
