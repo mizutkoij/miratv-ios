@@ -51,6 +51,8 @@ final class TSPipeline {
 
     /// 録画ファイルの再生か（true のとき、終端で止まって待ち、シークを受け付ける）
     var isFileMode = false
+    /// 音声のみ: 映像のパケットを読み捨てて、デコードしない（CPU・電池の節約）
+    var audioOnly = false
     private var fileSize: Int64 = 0
     private let seekLock = NSLock()
     private var _pendingSeek: Double?
@@ -222,6 +224,9 @@ final class TSPipeline {
         }
         for i in 0..<Int(fmt.pointee.nb_streams) where Int32(i) != videoIndex && Int32(i) != audioIndex && Int32(i) != captionIndex {
             fmt.pointee.streams[i]!.pointee.discard = AVDISCARD_ALL
+        }
+        if audioOnly && audioIndex >= 0 {
+            fmt.pointee.streams[Int(videoIndex)]!.pointee.discard = AVDISCARD_ALL
         }
         // 録画ファイル: 開始時刻・長さ・シーク可否（TvtPlay の「先頭 PCR と末尾 PCR の差」に相当。
         // libavformat がシーク可能な HTTP の末尾から PTS を読んで見積もる）

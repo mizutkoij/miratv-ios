@@ -154,6 +154,12 @@ struct RadioWebClient {
         return URL(string: pathOrURL, relativeTo: baseURL)?.absoluteURL
     }
 
+    /// radiko の聴き逃し（過去 7 日）を HLS(VOD) で。アーカイブ(nzb)に無い番組も聴ける。ft/to は JST の yyyyMMddHHmmss。
+    /// 初回はサーバーが 5 分刻みでセグメント一覧を集めるので少し待つ（以後 15 分はキャッシュ）
+    func timefreeURL(station: String, ft: String, to: String) -> URL {
+        url("timefree/radiko/\(station).m3u8", ["ft": ft, "to": to])
+    }
+
     // 読み取り系
     private var stationsCacheKey: String { "radio-stations-\(baseURL.host ?? "")" }
 

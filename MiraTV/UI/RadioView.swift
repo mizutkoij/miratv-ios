@@ -235,18 +235,57 @@ struct RadioStationView: View {
         .disabled(!playable)
     }
 
+    // MARK: 聴き逃し（radiko の過去 7 日をそのまま）
+
+    private static let jst: Calendar = {
+        var c = Calendar(identifier: .gregorian); c.timeZone = TimeZone(identifier: "Asia/Tokyo")!; return c
+    }()
+    private static let stamp: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "Asia/Tokyo"); f.dateFormat = "yyyyMMddHHmmss"; return f
+    }()
+
+    /// この番組を radiko の聴き逃しで聴けるなら、その開始・終了。放送日は 05:00 区切り（0〜4 時台は翌暦日）。
+    /// 終了済みで、開始が 7 日以内のものだけ
+    private func pastEntry(_ item: RadioScheduleItem) -> RadioPlayer.PastEntry? {
+        guard station.source == .radiko, let len = item.lengthSeconds else { return nil }
+        let p = item.ft.raw.split(separator: ":")
+        guard p.count == 2, let h = Int(p[0]), let m = Int(p[1]) else { return nil }
+        var c = Self.jst.dateComponents([.year, .month, .day], from: day)
+        c.hour = h; c.minute = m
+        guard var start = Self.jst.date(from: c) else { return nil }
+        if h < 5 { start = start.addingTimeInterval(86400) }
+        let end = start.addingTimeInterval(len)
+        guard end <= Date(), start >= Date().addingTimeInterval(-7 * 86400) else { return nil }
+        return RadioPlayer.PastEntry(item: item, ft: Self.stamp.string(from: start), to: Self.stamp.string(from: end))
+    }
+
     private func scheduleButton(_ i: Int, _ item: RadioScheduleItem) -> some View {
-        let isPlaying = item.nzb != nil && item.nzb == playingNzb
+        let past = pastEntry(item)
+        let isPlayingArchive = item.nzb != nil && item.nzb == playingNzb
+        let isPlayingPast: Bool = {
+            guard let past, case .timefree(let id) = radio.mode else { return false }
+            return id == past.id(station: station.id)
+        }()
+        let isPlaying = isPlayingArchive || isPlayingPast
+        let playable = past != nil || item.isArchived
         let playingIndex = items.firstIndex { $0.nzb != nil && $0.nzb == playingNzb }
         let isNext = playingIndex.map { i == $0 + 1 && item.isArchived } ?? false
         return Button {
-            radio.playArchive(item, stationName: station.name, queue: Array(items.dropFirst(i + 1)))
+            if item.isArchived {
+                // アーカイブ(nzb)があればそれが本命（5 月中旬から約半年分）
+                radio.playArchive(item, stationName: station.name, queue: Array(items.dropFirst(i + 1)))
+            } else if let past {
+                // まだアーカイブされていない直近の番組（放送後 1 日くらい）だけ、radiko の聴き逃しで埋める
+                let rest = items.dropFirst(i + 1).filter { !$0.isArchived }.compactMap(pastEntry)
+                radio.playPast(past, station: station, queue: Array(rest))
+            }
         } label: {
-            ScheduleRow(item: item, state: isPlaying ? "再生中" : (isNext ? "次に再生" : (item.isArchived ? "▶" : "")),
+            ScheduleRow(item: item, state: isPlaying ? "再生中" : (isNext ? "次に再生" : (playable ? "▶" : "")),
                         active: isPlaying)
         }
         .buttonStyle(.plain)
-        .disabled(!item.isArchived)
+        .disabled(!playable)
     }
 
     private func dayLabel(_ d: Date) -> String {
@@ -312,7 +351,7 @@ struct RadioMiniPlayer: View {
     var body: some View {
         if radio.mode != .idle {
             VStack(spacing: 8) {
-                if case .archive = radio.mode, radio.duration > 0 {
+                if radio.mode.isOnDemand, radio.duration > 0 {
                     ProgressBar(progress: radio.position / radio.duration)
                 }
                 HStack(spacing: 10) {
@@ -328,7 +367,7 @@ struct RadioMiniPlayer: View {
                         statusLine
                     }
                     Spacer(minLength: 4)
-                    if case .archive = radio.mode {
+                    if radio.mode.isOnDemand {
                         Button { radio.seek(by: -15) } label: { Image(systemName: "gobackward.15") }
                             .frame(width: 36, height: 44)
                         Button { radio.seek(by: 30) } label: { Image(systemName: "goforward.30") }

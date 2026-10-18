@@ -14,6 +14,25 @@ struct PlaybackChoice: Identifiable, Hashable {
         id: -1, title: "原画質", source: "Mirakurun",
         spec: "MPEG-2 TS · 1440×1080i · 約15Mbps", abilities: "データ放送◯ 5.1ch◯ 主/副音声◯")
 
+    /// 映像をデコードしない（端末側で捨てる）。通信量は原画質と同じだが、CPU・電池をほとんど使わない
+    static let audioOnly = PlaybackChoice(
+        id: -2, title: "音声のみ", source: "Mirakurun",
+        spec: "AAC · 映像はデコードしない · 通信量は原画質と同じ", abilities: "電池の節約 · 字幕◯ 主/副音声◯")
+
+    /// id 1000 以上 = EPGStation の変換 M2TS（index は ESLiveHLSModes.m2tsNames の位置）
+    static let m2tsBase = 1000
+
+    static func fromM2TS(_ names: [String]) -> [PlaybackChoice] {
+        names.enumerated().map { i, name in
+            PlaybackChoice(
+                id: m2tsBase + i,
+                title: "変換（TS）",
+                source: "EPGStation",
+                spec: "\(name) · 端末の再生エンジン",
+                abilities: "字幕◯（変換の設定で字幕を残していれば） データ放送×")
+        }
+    }
+
     /// EPGStation の HLS 名（"720p" など）から選択肢を作る。先頭を高画質、以降を省データとして並べる
     static func fromHLS(_ names: [String]) -> [PlaybackChoice] {
         names.enumerated().map { i, name in
@@ -33,6 +52,8 @@ struct QualitySheet: View {
     let selectedID: Int
     let isExpensiveNetwork: Bool
     let loadingChoices: Bool
+    /// 設定「サーバーで変換する再生モードを使う」
+    let transcodeAllowed: Bool
     let onSelect: (PlaybackChoice) -> Void
 
     @AppStorage("autoLowDataOnCellular") private var autoLow = false
@@ -50,12 +71,17 @@ struct QualitySheet: View {
             ScrollView {
                 VStack(spacing: 8) {
                     ForEach(choices) { c in card(c) }
-                    if loadingChoices {
+                    if !transcodeAllowed {
+                        Text("サーバーに負荷をかけないよう、変換配信（EPGStation の ffmpeg）は使わない設定です。設定の「サーバーで変換する再生モードを使う」で変えられます")
+                            .font(Theme.F.caption).foregroundStyle(Theme.C.text4)
+                    } else if loadingChoices {
                         Text("EPGStation の設定を確認中…").font(Theme.F.caption).foregroundStyle(Theme.C.text4)
+                    } else if choices.count <= 2 {
+                        Text("EPGStation にライブ配信（HLS / M2TS の変換）の設定が無いため、変換の選択肢はありません。config.yml の stream.live を確認してください")
+                            .font(Theme.F.caption).foregroundStyle(Theme.C.text4)
                     }
-                    audioOnlyCard
                 }
-                toggles.padding(.top, 8)
+                if transcodeAllowed { toggles.padding(.top, 8) }
             }
         }
         .padding(20)
@@ -86,24 +112,6 @@ struct QualitySheet: View {
                 .stroke(on ? Theme.C.accent : Theme.C.border, lineWidth: on ? 1.5 : 1))
         }
         .buttonStyle(.plain)
-    }
-
-    /// 音声のみは EPGStation 側に専用の設定が無い（streamConfig に無い）ため、今は選べない
-    private var audioOnlyCard: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("音声のみ").font(Theme.F.jp(16, .bold)).foregroundStyle(Theme.C.muted)
-                Spacer()
-                Text("EPGStation").font(Theme.F.caption).foregroundStyle(Theme.C.muted)
-            }
-            Text("AAC 2ch 128kbps · 画面オフ・バックグラウンド").font(Theme.F.mono(12, .medium)).foregroundStyle(Theme.C.muted)
-            Text("EPGStation に音声のみの配信設定がないため、今は選べません").font(Theme.F.caption).foregroundStyle(Theme.C.muted)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(Theme.C.row, in: RoundedRectangle(cornerRadius: Theme.R.card))
-        .overlay(RoundedRectangle(cornerRadius: Theme.R.card).stroke(Theme.C.border))
-        .opacity(0.7)
     }
 
     private var toggles: some View {

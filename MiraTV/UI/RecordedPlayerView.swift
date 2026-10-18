@@ -21,6 +21,7 @@ struct RecordedPlayerView: View {
     @State private var showPanel = true
     @State private var scrub: Double?
     @AppStorage("autoSkipCM") private var autoSkipCM = false
+    @AppStorage("cmDetection") private var cmDetection = true
     /// homeserver の CM 検出サービスが無音位置から推定した CM ブロック（秒）
     @State private var cmBlocks: [(start: Double, end: Double)] = []
     @State private var cmStatus = ""
@@ -142,7 +143,7 @@ struct RecordedPlayerView: View {
 
     private func autoSkipIfNeeded() {
         if let a = autoSkipped, engine.position < a - 5 { autoSkipped = nil }   // ブロックより前へ戻ったら、また対象にする
-        guard autoSkipCM, !engine.isPaused, scrub == nil, let b = currentCM else { return }
+        guard cmDetection, autoSkipCM, !engine.isPaused, scrub == nil, let b = currentCM else { return }
         if autoSkipped == b.start { return }
         autoSkipped = b.start
         engine.seek(to: b.end + 0.3)
@@ -150,7 +151,7 @@ struct RecordedPlayerView: View {
 
     /// 解析は homeserver 側で非同期に走る（約 1 分/時間）。終わるまで 3 秒おきに聞く（最大 約 30 分）
     private func loadChapters() async {
-        guard !useAVPlayer, let file, let name = file.filename, let client = Servers.chapters else { return }
+        guard cmDetection, !useAVPlayer, let file, let name = file.filename, let client = Servers.chapters else { return }
         for _ in 0..<600 {
             if Task.isCancelled { return }
             do {

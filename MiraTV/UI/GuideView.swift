@@ -33,20 +33,24 @@ struct GuideView: View {
         return c
     }
 
-    /// 放送日は 05:00 から翌 05:00。今日の 0:00〜4:59 は前日の放送日に含める
-    private var windowStart: Date {
+    /// 今日から 7 日分（今日 + 6 日）
+    private static let dayCount = 7
+
+    /// 1 日は 0:00〜24:00（JST）。日をまたぐ番組は、前の日では下端・次の日では上端で切れて両方に出る
+    private func dayStart(_ offset: Int) -> Date {
         let cal = Self.jst
-        let today = cal.startOfDay(for: Date())
-        var base = cal.date(byAdding: .day, value: dayOffset, to: today)!.addingTimeInterval(5 * 3600)
-        if dayOffset == 0 && Date() < base { base = base.addingTimeInterval(-86400) }
-        return base
+        return cal.date(byAdding: .day, value: offset, to: cal.startOfDay(for: Date()))!
     }
+
+    private var windowStart: Date { dayStart(dayOffset) }
+
+    private func cacheKey(_ offset: Int) -> String { "\(band)-\(Int(dayStart(offset).timeIntervalSince1970))" }
 
     private func bandLabel(_ b: String) -> String { b == "GR" ? "地上波" : b }
 
     private func dayLabel(_ offset: Int) -> String {
         if offset == 0 { return "今日" }
-        if offset == 1 { return "翌日" }
+        if offset == 1 { return "明日" }
         let d = Self.jst.date(byAdding: .day, value: offset, to: Self.jst.startOfDay(for: Date()))!
         let f = DateFormatter()
         f.locale = Locale(identifier: "ja_JP")
@@ -78,7 +82,7 @@ struct GuideView: View {
                 }
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
-                        ForEach(0..<7, id: \.self) { i in
+                        ForEach(0..<Self.dayCount, id: \.self) { i in
                             ChipView(label: dayLabel(i), selected: i == dayOffset) { dayOffset = i }
                         }
                     }
@@ -142,8 +146,9 @@ struct GuideView: View {
                         Text(s.channel.name).font(Theme.F.jp(11, .medium)).foregroundStyle(Theme.C.text2).lineLimit(1)
                     }
                 }
-                .frame(width: Theme.guideColumnWidth, height: 44, alignment: .leading)
                 .padding(.leading, 4)
+                .frame(width: Theme.guideColumnWidth, height: 44, alignment: .leading)
+                .clipped()
             }
         }
         .background(Theme.C.bg)
@@ -153,7 +158,7 @@ struct GuideView: View {
     private var timeColumn: some View {
         VStack(spacing: 0) {
             ForEach(0..<24, id: \.self) { i in
-                Text("\((5 + i) % 24)")
+                Text("\(i)")
                     .font(Theme.F.mono(12, .medium)).foregroundStyle(Theme.C.text4)
                     .frame(width: Theme.guideTimeColumnWidth, height: 60 * ppm, alignment: .top)
             }
@@ -163,9 +168,22 @@ struct GuideView: View {
     private func column(_ s: ESSchedule) -> some View {
         ZStack(alignment: .topLeading) {
             Color.clear.frame(width: Theme.guideColumnWidth, height: totalHeight)
-            ForEach(s.programs) { p in block(p, channel: s.channel) }
+            ForEach(visiblePrograms(s)) { p in block(p, channel: s.channel) }
         }
-        .frame(width: Theme.guideColumnWidth, height: totalHeight)
+        .frame(width: Theme.guideColumnWidth, height: totalHeight, alignment: .topLeading)
+        .clipped()
+    }
+
+    /// その日（0:00〜24:00）にかかる番組だけ。範囲外の番組を描くと、上端に潰れた箱が重なったり、
+    /// 列の下にはみ出したりする。重複（同じ番組 ID）も除く
+    private func visiblePrograms(_ s: ESSchedule) -> [ESProgram] {
+        let from = Int64(windowStart.timeIntervalSince1970 * 1000)
+        let to = from + 86_400_000
+        var seen = Set<Int64>()
+        return s.programs
+            .filter { $0.endAt > from && $0.startAt < to && $0.endAt > $0.startAt }
+            .sorted { $0.startAt < $1.startAt }
+            .filter { seen.insert($0.id).inserted }
     }
 
     private func block(_ esProgram: ESProgram, channel: ESChannel) -> some View {
@@ -220,6 +238,34 @@ struct GuideView: View {
 
     // MARK: - 読み込み
 
+    /// その日（0:00〜24:00）の番組表を取って、メモリと端末に保存する
+    private func fetch(_ offset: Int, es: EPGStationClient) async throws -> [ESSchedule] {
+        let start = dayStart(offset)
+        let key = cacheKey(offset)
+        let list = Self.sorted(try await es.schedules(from: start, to: start.addingTimeInterval(86400),
+                                                      types: band == "CS" ? ["CS", "SKY"] : [band],
+                                                      cacheKey: "guide-" + key))
+        cache[key] = list
+        return list
+    }
+
+    /// 表示中の日が出たら、残りの日も 1 日ずつ裏で取っておく（日付を切り替えたときに待たないように）。
+    /// 端末に 1 時間以内の分があれば取らない。日付や放送波を切り替えると task ごと止まる
+    private func prefetchOtherDays() async {
+        guard let es = Servers.epgstation else { return }
+        for offset in 0..<Self.dayCount where offset != dayOffset {
+            if Task.isCancelled { return }
+            let key = cacheKey(offset)
+            if cache[key] != nil { continue }
+            if (DiskCache.age("guide-" + key) ?? .infinity) < 3600,
+               let saved = EPGStationClient.cachedSchedules(key: "guide-" + key), !saved.isEmpty {
+                cache[key] = Self.sorted(saved)
+                continue
+            }
+            _ = try? await fetch(offset, es: es)
+        }
+    }
+
     private static func sorted(_ list: [ESSchedule]) -> [ESSchedule] {
         list.sorted { ($0.channel.remoteControlKeyId ?? 999, $0.channel.serviceId ?? 0)
                     < ($1.channel.remoteControlKeyId ?? 999, $1.channel.serviceId ?? 0) }
@@ -228,9 +274,8 @@ struct GuideView: View {
     /// このセッションで取れたものはそのまま使う。端末に前回の分があればまずそれを出し、裏で取り直す
     /// （番組表は 1 日 1MB 前後あり、毎回待つと「接続中」が長い）
     private func load() async {
-        let start = windowStart
-        let key = "\(band)-\(Int(start.timeIntervalSince1970))"
-        if let c = cache[key] { columns = c; errorText = nil; return }
+        let key = cacheKey(dayOffset)
+        if let c = cache[key] { columns = c; errorText = nil; await prefetchOtherDays(); return }
         let diskKey = "guide-" + key
         var showingStale = false
         if let saved = EPGStationClient.cachedSchedules(key: diskKey), !saved.isEmpty {
@@ -242,12 +287,10 @@ struct GuideView: View {
         loading = true
         defer { loading = false }
         do {
-            let list = Self.sorted(try await es.schedules(from: start, to: start.addingTimeInterval(86400),
-                                                          types: band == "CS" ? ["CS", "SKY"] : [band],
-                                                          cacheKey: diskKey))
-            cache[key] = list
-            columns = list
+            columns = try await fetch(dayOffset, es: es)
             errorText = nil
+            loading = false
+            await prefetchOtherDays()
         } catch {
             if !showingStale { errorText = describeError(error) }
             DebugLog.log("net", "番組表の取得に失敗\(showingStale ? "（前回の分で表示中）" : ""): \(describeError(error))")

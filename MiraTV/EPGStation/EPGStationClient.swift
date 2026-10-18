@@ -124,6 +124,10 @@ struct ESStorage: Decodable {
 /// `/api/config` の streamConfig.live.hls（ライブ HLS の選択肢。index が mode になる）
 struct ESLiveHLSModes {
     var names: [String]
+    /// 変換ありの M2TS プリセット名（H.264 などに変換した TS）。端末の FFmpeg エンジンでそのまま再生でき、字幕も残せる
+    var m2tsNames: [String] = []
+    /// 上の各プリセットの、config の m2ts 配列の中での位置（URL の mode に使う。無変換のものを除いているためずれる）
+    var m2tsModes: [Int] = []
 }
 
 enum ESError: LocalizedError {
@@ -296,11 +300,22 @@ struct EPGStationClient {
     func liveHLSModes() async throws -> ESLiveHLSModes {
         struct Cfg: Decodable {
             struct Stream: Decodable { let live: Live? }
-            struct Live: Decodable { let hls: [String]? }
+            // api.yml では streamConfig.live 直下に hls / m2ts があるが、config.yml と同じく live.ts の下に
+            // 入れて返す版もあるため、両方を見る
+            struct Live: Decodable { let hls: [String]?; let m2ts: [LossyDecodable<M2TS>]?; let ts: Formats? }
+            struct Formats: Decodable { let hls: [String]?; let m2ts: [LossyDecodable<M2TS>]? }
+            struct M2TS: Decodable { let name: String; let isUnconverted: Bool? }
             let streamConfig: Stream?
         }
         let cfg: Cfg = try await get("api/config", timeout: 15)
-        return ESLiveHLSModes(names: cfg.streamConfig?.live?.hls ?? [])
+        let live = cfg.streamConfig?.live
+        var modes = ESLiveHLSModes(names: live?.hls ?? live?.ts?.hls ?? [])
+        for (i, item) in (live?.m2ts ?? live?.ts?.m2ts ?? []).enumerated() {
+            guard let m = item.value, m.isUnconverted != true else { continue }   // 無変換は「原画質」と同じなので出さない
+            modes.m2tsNames.append(m.name)
+            modes.m2tsModes.append(i)
+        }
+        return modes
     }
 
     // MARK: URL
@@ -309,6 +324,11 @@ struct EPGStationClient {
     func thumbnailURL(id: Int) -> URL { url("api/thumbnails/\(id)") }
     func videoURL(fileId: Int) -> URL { url("api/videos/\(fileId)") }
     /// ライブ HLS。mode は `/api/config` の streamConfig.live.hls の並び順（0 始まり）
+    /// ライブ M2TS（変換あり）。mode は streamConfig.live.m2ts の並び順
+    func liveM2TSURL(channelId: Int, mode: Int) -> URL {
+        url("api/streams/live/\(channelId)/m2ts", ["mode": String(mode)])
+    }
+
     func liveHLSURL(channelId: Int, mode: Int) -> URL {
         url("api/streams/live/\(channelId)/hls", ["mode": String(mode)])
     }

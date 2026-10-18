@@ -43,6 +43,7 @@ final class PlayerEngine: ObservableObject {
     /// 音声が 3 秒以上届いていない（音声の切替・デコード失敗など）ときは、映像だけで判定する。
     /// でないと音声が戻るまで時計が止まったままになる
     private var mediaEnd: Double {
+        if audioOnlyMode && expectAudio { return audioEnd }
         guard expectAudio, audioEnd > 0, videoEnd - audioEnd <= 3 else { return videoEnd }
         return min(audioEnd, videoEnd)
     }
@@ -83,6 +84,10 @@ final class PlayerEngine: ObservableObject {
     private var expectAudio = true
     /// 再生開始前に貯める秒数。小さくすると低遅延だが途切れやすい
     var startupBuffer: Double = 0.8
+    /// 次の play() を音声のみで行う（映像をデコードしない）
+    var audioOnly = false
+    /// いまの再生が音声のみか（clockLock で保護）
+    private var audioOnlyMode = false
 
     init() {
         displayLayer.videoGravity = .resize   // アスペクトは SwiftUI 側で DAR に合わせる
@@ -99,7 +104,7 @@ final class PlayerEngine: ObservableObject {
         genLock.lock(); generation += 1; let gen = generation; genLock.unlock()
         try? AVAudioSession.sharedInstance().setActive(true)
         clockLock.lock()
-        clockStarted = false; firstAudioPTS = nil; sawVideo = false; expectAudio = true
+        clockStarted = false; firstAudioPTS = nil; sawVideo = false; expectAudio = true; audioOnlyMode = audioOnly
         pausedFlag = false; seekPendingFlag = false; audioEnd = 0; videoEnd = 0; stalled = false
         clockLock.unlock()
         state = .connecting
@@ -152,6 +157,7 @@ final class PlayerEngine: ObservableObject {
             })
         let p = TSPipeline(url: url, callbacks: callbacks)
         p.isFileMode = file
+        p.audioOnly = audioOnly
         p.audioMode = audioMode
         pipeline = p
         p.start()
@@ -259,7 +265,7 @@ final class PlayerEngine: ObservableObject {
         audioEnd = max(audioEnd, Self.endSeconds(sb))
         if firstAudioPTS == nil { firstAudioPTS = pts }
         var startAt: CMTime?
-        if !clockStarted, sawVideo, let first = firstAudioPTS,
+        if !clockStarted, sawVideo || audioOnlyMode, let first = firstAudioPTS,
            (pts - first).seconds >= startupBuffer {
             clockStarted = true
             startAt = first

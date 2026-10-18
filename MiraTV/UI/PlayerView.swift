@@ -18,6 +18,8 @@ struct PlayerView: View {
     @EnvironmentObject private var radio: RadioPlayer
     @Environment(\.dismiss) private var dismiss
     @AppStorage("autoLowDataOnCellular") private var autoLowData = false
+    /// 変換配信（EPGStation の ffmpeg）を使うか。既定はオフ＝サーバーに変換の負荷をかけない
+    @AppStorage("allowServerTranscode") private var allowTranscode = false
 
     @State private var now = Date()
     @State private var showPanel = true
@@ -25,9 +27,12 @@ struct PlayerView: View {
     @State private var dataMode = false
     @State private var captionsOn = false
     @State private var showQuality = false
-    /// -1 = 原画質（Mirakurun を端末でデコード）、0 以上 = EPGStation の HLS mode
+    /// -1 = 原画質（Mirakurun を端末でデコード）、-2 = 音声のみ（同じストリームで映像をデコードしない）、
+    /// 0〜999 = EPGStation の HLS mode、1000 以上 = EPGStation の変換 M2TS（端末のエンジンで再生）
     @State private var modeID = -1
     @State private var hlsNames: [String] = []
+    @State private var m2tsNames: [String] = []
+    @State private var m2tsModes: [Int] = []
     @State private var loadingModes = false
     private let ticker = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
 
@@ -38,11 +43,18 @@ struct PlayerView: View {
     }
 
     private var program: Program? { epg.current(current, at: now) }
-    private var isHLS: Bool { modeID >= 0 }
+    private var isHLS: Bool { modeID >= 0 && modeID < PlaybackChoice.m2tsBase }
+    private var isM2TS: Bool { modeID >= PlaybackChoice.m2tsBase }
+    private var isAudioOnly: Bool { modeID == -2 }
     private var isDualMono: Bool { !isHLS && (program?.isDualMono ?? false) }
+    /// 主/副の切替は 2ch の音声なら選べるようにする（番組表の「二か国語」情報が取れていなくても使えるように）
+    private var audioSelectable: Bool { !isHLS && (isDualMono || engine.info.audioChannels == 2) }
     private var webBMLURL: URL? { Servers.webBML.flatMap { BMLURL.make(base: $0, service: current) } }
-    private var dataAvailable: Bool { !isHLS && webBMLURL != nil }
-    private var choices: [PlaybackChoice] { [.original] + PlaybackChoice.fromHLS(hlsNames) }
+    private var dataAvailable: Bool { modeID == -1 && webBMLURL != nil }
+    private var choices: [PlaybackChoice] {
+        guard allowTranscode else { return [.original, .audioOnly] }
+        return [.original, .audioOnly] + PlaybackChoice.fromHLS(hlsNames) + PlaybackChoice.fromM2TS(m2tsNames)
+    }
     private var captionAvailable: Bool { !isHLS && engine.info.hasCaption }
 
     private func toggleCaptions() {
@@ -96,13 +108,22 @@ struct PlayerView: View {
             await epg.loadDetail(service: current, es: Servers.epgstation, mirakurun: client)
         }
         .task {
-            guard let es = Servers.epgstation else { return }
+            // 変換配信を使わない設定なら、EPGStation の設定を読みにも行かない（省データの自動切替もしない）
+            guard allowTranscode, let es = Servers.epgstation else { return }
             // 変換のプリセットはサーバーの設定ファイルで決まっていて、まず変わらない。前回の分をすぐ使い、裏で取り直す
             let savedKey = "hlsModeNames"
             if let saved = UserDefaults.standard.stringArray(forKey: savedKey) { hlsNames = saved } else { loadingModes = true }
-            if let names = try? await es.liveHLSModes().names {
-                hlsNames = names
-                UserDefaults.standard.set(names, forKey: savedKey)
+            if let saved = UserDefaults.standard.stringArray(forKey: "m2tsModeNames"),
+               let idx = UserDefaults.standard.array(forKey: "m2tsModeIndexes") as? [Int], idx.count == saved.count {
+                m2tsNames = saved; m2tsModes = idx
+            }
+            if let modes = try? await es.liveHLSModes() {
+                hlsNames = modes.names
+                m2tsNames = modes.m2tsNames
+                m2tsModes = modes.m2tsModes
+                UserDefaults.standard.set(modes.names, forKey: savedKey)
+                UserDefaults.standard.set(modes.m2tsNames, forKey: "m2tsModeNames")
+                UserDefaults.standard.set(modes.m2tsModes, forKey: "m2tsModeIndexes")
             }
             loadingModes = false
             // モバイル回線で自動省データが有効なら、最も軽い HLS に切り替える
@@ -113,7 +134,7 @@ struct PlayerView: View {
         }
         .sheet(isPresented: $showQuality) {
             QualitySheet(choices: choices, selectedID: modeID, isExpensiveNetwork: network.isExpensive,
-                         loadingChoices: loadingModes) { c in setMode(c.id) }
+                         loadingChoices: loadingModes, transcodeAllowed: allowTranscode) { c in setMode(c.id) }
         }
     }
 
@@ -121,13 +142,22 @@ struct PlayerView: View {
 
     private func startPlayback() {
         engine.audioMode = .both
-        if modeID >= 0, let es = Servers.epgstation {
+        let es = Servers.epgstation
+        if isHLS, let es {
             engine.stop()
             dataMode = false
             hls.play(url: es.liveHLSURL(channelId: current.id, mode: modeID))
-        } else {
-            modeID = -1
+        } else if isM2TS, let es, m2tsModes.indices.contains(modeID - PlaybackChoice.m2tsBase) {
+            // 変換した TS は端末のエンジンで再生する（字幕・主/副・PiP はそのまま使える。データ放送は消える）
             hls.stop()
+            dataMode = false
+            engine.audioOnly = false
+            engine.play(url: es.liveM2TSURL(channelId: current.id, mode: m2tsModes[modeID - PlaybackChoice.m2tsBase]))
+        } else {
+            if modeID != -2 { modeID = -1 }
+            hls.stop()
+            if isAudioOnly { dataMode = false }
+            engine.audioOnly = isAudioOnly
             engine.play(url: client.streamURL(for: current))
         }
     }
@@ -164,7 +194,7 @@ struct PlayerView: View {
     }
 
     private var audioLabel: String {
-        guard isDualMono else { return "音声" }
+        guard audioSelectable else { return !isHLS && engine.info.audioChannels == 6 ? "5.1ch" : "音声" }
         switch engine.audioMode {
         case .both: return "主+副"
         case .main: return "主"
@@ -176,6 +206,10 @@ struct PlayerView: View {
         if isHLS, hlsNames.indices.contains(modeID), let c = choices.first(where: { $0.id == modeID }) {
             return "\(c.title) · \(hlsNames[modeID])"
         }
+        if isM2TS, m2tsNames.indices.contains(modeID - PlaybackChoice.m2tsBase) {
+            return "変換 · \(m2tsNames[modeID - PlaybackChoice.m2tsBase])"
+        }
+        if isAudioOnly { return "音声のみ" }
         switch engine.info.audioChannels {
         case 0: return "原画質"
         case 6: return "原画質 · 5.1ch"
@@ -186,11 +220,26 @@ struct PlayerView: View {
     // MARK: - 映像
 
     @ViewBuilder private var videoSurface: some View {
-        if isHLS {
+        if isAudioOnly {
+            audioOnlyPlaceholder
+        } else if isHLS {
             PlayerLayerSurface(player: hls.player).aspectRatio(16.0 / 9.0, contentMode: .fit)
         } else {
             VideoSurface(layer: engine.displayLayer).aspectRatio(engine.info.displayAspect, contentMode: .fit)
         }
+    }
+
+    /// 音声のみのときの映像の代わり（局ロゴと番組名）
+    private var audioOnlyPlaceholder: some View {
+        VStack(spacing: 10) {
+            LogoTile(url: client.logoURL(for: current), size: Theme.Logo.list)
+            Text("音声のみ").font(Theme.F.jp(13, .bold)).foregroundStyle(Theme.C.text2)
+            Text(program?.title ?? "").font(Theme.F.caption).foregroundStyle(Theme.C.text4).lineLimit(1)
+        }
+        .padding(.horizontal, 20)
+        .frame(maxWidth: .infinity)
+        .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        .background(Theme.C.video)
     }
 
     private var boxed: Bool { dataMode && bml.videoRect != nil }
@@ -258,10 +307,10 @@ struct PlayerView: View {
     private var controlRow: some View {
         HStack(spacing: 8) {
             ControlTile(icon: "captions.bubble", label: "字幕", enabled: captionAvailable, active: captionsOn) { toggleCaptions() }
-            ControlTile(icon: "speaker.wave.2", label: audioLabel, enabled: isDualMono,
-                        active: isDualMono && engine.audioMode != .both) { cycleAudio() }
+            ControlTile(icon: "speaker.wave.2", label: audioLabel, enabled: audioSelectable,
+                        active: audioSelectable && engine.audioMode != .both) { cycleAudio() }
             ControlTile(icon: "d.circle", label: "データ", enabled: dataAvailable, active: dataMode) { dataMode.toggle() }
-            PiPTile(pip: engine.pip, supported: !isHLS)
+            PiPTile(pip: engine.pip, supported: !isHLS && !isAudioOnly)
             ControlTile(icon: "arrow.up.left.and.arrow.down.right", label: "全画面") { setOrientation(.landscape) }
         }
         .padding(.horizontal, 12)
@@ -439,10 +488,10 @@ struct PlayerView: View {
             }
             Spacer()
             CapsuleTile(label: "字幕", enabled: captionAvailable, active: captionsOn) { toggleCaptions() }
-            CapsuleTile(label: isDualMono ? audioLabel : "主音声", enabled: isDualMono,
-                        active: isDualMono && engine.audioMode != .both) { cycleAudio() }
+            CapsuleTile(label: audioLabel, enabled: audioSelectable,
+                        active: audioSelectable && engine.audioMode != .both) { cycleAudio() }
             CapsuleTile(label: "d", enabled: dataAvailable, active: dataMode) { dataMode.toggle() }
-            PiPCapsule(pip: engine.pip, supported: !isHLS)
+            PiPCapsule(pip: engine.pip, supported: !isHLS && !isAudioOnly)
         }
         .padding(.horizontal, 16).padding(.vertical, 8)
         .background(Theme.C.overlayBar)

@@ -10,6 +10,9 @@ struct SettingsView: View {
     @AppStorage("autoSkipCM") private var autoSkipCM = false
     @AppStorage("showInactiveChannels") private var showInactive = false
     @AppStorage("debugLog") private var debugLog = true
+    /// EPGStation に変換（ffmpeg のエンコード）をさせる再生モードを使うか。サーバーの CPU を大きく使うので既定はオフ
+    @AppStorage("allowServerTranscode") private var allowTranscode = false
+    @AppStorage("cmDetection") private var cmDetection = true
 
     @EnvironmentObject private var epg: EPGStore
 
@@ -41,9 +44,26 @@ struct SettingsView: View {
                     .buttonStyle(.plain)
                     .disabled(testing)
 
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("サーバーで変換する再生モードを使う", isOn: $allowTranscode)
+                            .tint(Theme.C.accent)
+                            .font(Theme.F.jp(14)).foregroundStyle(Theme.C.text)
+                        Text("オフ（おすすめ）: テレビも録画も、元の TS をそのまま受け取って端末でデコードします。EPGStation に変換をさせないので、サーバーの負荷はほぼ配信だけです。オンにすると再生モードに「高画質変換・省データ・変換（TS）」が出ますが、見ている間 EPGStation が ffmpeg でエンコードし続けます。")
+                            .font(Theme.F.caption).foregroundStyle(Theme.C.text4)
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("録画の CM を検出する", isOn: $cmDetection)
+                            .tint(Theme.C.accent)
+                            .font(Theme.F.jp(14)).foregroundStyle(Theme.C.text)
+                        Text("録画を開くと homeserver が音声だけを読んで無音の位置を調べます（エンコードはしません。1 時間の番組で約 1 分、1 回だけ）。")
+                            .font(Theme.F.caption).foregroundStyle(Theme.C.text4)
+                    }
+
                     Toggle("録画の CM を自動でスキップ", isOn: $autoSkipCM)
                         .tint(Theme.C.accent)
                         .font(Theme.F.jp(14)).foregroundStyle(Theme.C.text)
+                        .disabled(!cmDetection)
 
                     VStack(alignment: .leading, spacing: 6) {
                         Toggle("デバッグログを送る", isOn: $debugLog)

@@ -15,6 +15,24 @@ final class RadioPlayer: ObservableObject {
         case idle
         case live(stationKey: String)
         case archive(nzb: String)
+        /// radiko の聴き逃しを直接（過去 7 日）。id は「局-開始時刻」
+        case timefree(id: String)
+
+        /// 録画のように長さがあり、シークできる再生
+        var isOnDemand: Bool {
+            switch self {
+            case .archive, .timefree: true
+            case .idle, .live: false
+            }
+        }
+    }
+
+    /// 聴き逃し 1 件（番組表の 1 行 + radiko に渡す開始・終了）
+    struct PastEntry: Equatable {
+        let item: RadioScheduleItem
+        let ft: String   // JST yyyyMMddHHmmss
+        let to: String
+        func id(station: String) -> String { "\(station)-\(ft)" }
     }
 
     enum Phase: Equatable {
@@ -56,6 +74,11 @@ final class RadioPlayer: ObservableObject {
     /// 継ぎ足しの有無を判定する許容誤差（秒）。番組表の長さ + 25 秒前後ならスティッチ済み
     private static let stitchTolerance: Double = 10
     private var archiveRetried = false
+
+    // 聴き逃し（radiko timefree）の連続再生
+    private var pastQueue: [PastEntry] = []
+    private var currentPast: PastEntry?
+    private var pastStation: RadioStation?
 
     // ライブの自動再接続。radio-web の中継（radiko 認証・セグメント取得）や Tailscale の経路切替で
     // 1 回目が落ちることが多く、手で「再試行」すると直るため、同じことを自動でやる
@@ -177,6 +200,23 @@ final class RadioPlayer: ObservableObject {
         }
     }
 
+    /// radiko の聴き逃しを直接再生する。`queue` は同じ日の後続番組（終了時に自動で次へ）
+    func playPast(_ entry: PastEntry, station: RadioStation, queue: [PastEntry] = []) {
+        guard let resolver else { return }
+        start(mode: .timefree(id: entry.id(station: station.id)))
+        currentPast = entry; pastStation = station; pastQueue = queue; archiveRetried = false
+        now = NowInfo(stationName: station.name, title: entry.item.title, performer: entry.item.pfm ?? "",
+                      artworkURL: entry.item.thumbnail.flatMap(URL.init(string:)))
+        DebugLog.log("radio", "聴き逃し \(station.id) \(entry.ft)-\(entry.to) \(entry.item.title)")
+        load(resolver.client.timefreeURL(station: station.id, ft: entry.ft, to: entry.to), startAt: nil)
+    }
+
+    private func advancePast() {
+        guard !pastQueue.isEmpty, let st = pastStation else { phase = .paused; return }
+        let next = pastQueue.removeFirst()
+        playPast(next, station: st, queue: pastQueue)
+    }
+
     private func advanceArchive() {
         guard !archiveQueue.isEmpty else { phase = .paused; return }
         let next = archiveQueue.removeFirst()
@@ -190,7 +230,7 @@ final class RadioPlayer: ObservableObject {
     }
 
     func seek(by delta: Double) {
-        guard case .archive = mode else { return }
+        guard mode.isOnDemand else { return }
         seek(to: max(0, min(duration, position + delta)))
     }
 
@@ -247,7 +287,9 @@ final class RadioPlayer: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self else { return }
-                if case .live = self.mode { self.retryLiveOrFail(nil) } else { self.advanceArchive() }
+                if case .live = self.mode { self.retryLiveOrFail(nil) }
+                else if case .timefree = self.mode { self.advancePast() }
+                else { self.advanceArchive() }
             }
             .store(in: &itemBag)
 
@@ -289,6 +331,12 @@ final class RadioPlayer: ObservableObject {
     /// アーカイブのトークンはサーバー再起動・1 時間無アクセスで失効（404）→ 1 回だけ play を取り直す
     private func handleItemFailure(_ error: Error?) {
         if case .live = mode { retryLiveOrFail(error); return }
+        if case .timefree = mode, !archiveRetried, let e = currentPast, let st = pastStation, let resolver {
+            archiveRetried = true   // サーバーがセグメント一覧を集め切れなかったときなどに 1 回だけ取り直す
+            DebugLog.log("radio", "聴き逃しを取り直し \(st.id) \(e.ft)")
+            load(resolver.client.timefreeURL(station: st.id, ft: e.ft, to: e.to), startAt: nil)
+            return
+        }
         if case .archive(let nzb) = mode, !archiveRetried {
             archiveRetried = true
             resolveAndLoadArchive(nzb)
@@ -322,7 +370,7 @@ final class RadioPlayer: ObservableObject {
     }
 
     private func updateNowPlayingElapsed() {
-        guard case .archive = mode, var info = MPNowPlayingInfoCenter.default().nowPlayingInfo else { return }
+        guard mode.isOnDemand, var info = MPNowPlayingInfoCenter.default().nowPlayingInfo else { return }
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = position
         info[MPNowPlayingInfoPropertyPlaybackRate] = player.rate
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
