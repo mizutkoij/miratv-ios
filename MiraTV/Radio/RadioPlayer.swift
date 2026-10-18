@@ -258,6 +258,7 @@ final class RadioPlayer: ObservableObject {
         player.replaceCurrentItem(with: nil)
         itemBag.removeAll()
         self.mode = mode
+        DebugLog.log("radio", "再生開始 \(mode)")
         phase = .buffering
         position = 0; duration = 0
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, policy: .longFormAudio)
@@ -330,6 +331,7 @@ final class RadioPlayer: ObservableObject {
 
     /// アーカイブのトークンはサーバー再起動・1 時間無アクセスで失効（404）→ 1 回だけ play を取り直す
     private func handleItemFailure(_ error: Error?) {
+        DebugLog.log("radio", "項目の失敗 mode=\(mode) \(now.stationName): \(error.map(describeError) ?? "原因不明")")
         if case .live = mode { retryLiveOrFail(error); return }
         if case .timefree = mode, !archiveRetried, let e = currentPast, let st = pastStation, let resolver {
             archiveRetried = true   // サーバーがセグメント一覧を集め切れなかったときなどに 1 回だけ取り直す
@@ -347,6 +349,7 @@ final class RadioPlayer: ObservableObject {
 
     private func fail(_ error: Error) {
         guard !(error is CancellationError) else { return }
+        DebugLog.log("radio", "再生失敗 mode=\(mode) \(now.stationName): \(describeError(error))")
         phase = .failed(describeError(error))
     }
 

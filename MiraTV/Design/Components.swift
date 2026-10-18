@@ -11,6 +11,8 @@ enum Defaults {
     /// データ放送（web-bml）は自分で立てたサーバーの URL を設定画面で入れる。空なら「データ」は使えない
     /// homeserver の Docker コンテナ `web-bml`（Tailscale のアドレスだけで待ち受け、CPU 0.5 コア・メモリ 512MB に制限）
     static let webbmlURL = "http://192.0.2.10:23234"
+    /// 自前の中継（server/streamd.py）。映像を抜いた音声だけの TS などを、エンコードせずに返す
+    static let streamdURL = "http://192.0.2.10:23236"
 }
 
 extension Date {

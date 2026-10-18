@@ -7,6 +7,7 @@ struct SettingsView: View {
     @AppStorage("radioWebURL") private var radioURL = Defaults.radioWebURL
     @AppStorage("webbmlURL") private var webbmlURL = Defaults.webbmlURL
     @AppStorage("chapterURL") private var chapterURL = Defaults.chapterURL
+    @AppStorage("streamdURL") private var streamdURL = Defaults.streamdURL
     @AppStorage("autoSkipCM") private var autoSkipCM = false
     @AppStorage("showInactiveChannels") private var showInactive = false
     @AppStorage("debugLog") private var debugLog = true
@@ -32,6 +33,8 @@ struct SettingsView: View {
                     field("radio-web（ラジオ）", $radioURL, Defaults.radioWebURL, key: "radio")
                     field("web-bml（データ放送）", $webbmlURL, Defaults.webbmlURL, key: "webbml",
                           hint: "homeserver の Docker コンテナで動いています。空にすると「データ」ボタンは使えません。")
+                    field("中継 streamd（軽いストリーム）", $streamdURL, Defaults.streamdURL, key: "streamd",
+                          hint: "homeserver の server/streamd.py。エンコードせず、要らない TS パケットを捨てるだけ。音声のみが約 0.3Mbps になります。空なら使いません。")
                     field("CM 検出（録画のチャプター）", $chapterURL, Defaults.chapterURL, key: "chapter",
                           hint: "録画を開くと、homeserver が音声の無音位置から CM の区間を推定します（初回は 1 時間の番組で約 1 分）。")
 
@@ -137,6 +140,16 @@ struct SettingsView: View {
                 results["chapter"] = (code < 400, code < 400 ? "接続できました" : "HTTP \(code)")
             } catch { results["chapter"] = (false, describeError(error)) }
         } else { results["chapter"] = (false, "未設定（CM の検出は使えません）") }
+
+        if let base = Servers.streamd {
+            do {
+                var req = URLRequest(url: base.appending(path: "health"))
+                req.timeoutInterval = 10
+                let (_, res) = try await URLSession.shared.data(for: req)
+                let code = (res as? HTTPURLResponse)?.statusCode ?? 0
+                results["streamd"] = (code < 400, code < 400 ? "接続できました" : "HTTP \(code)")
+            } catch { results["streamd"] = (false, describeError(error)) }
+        } else { results["streamd"] = (false, "未設定（音声のみは原画質と同じ通信量になります）") }
 
         let bml = webbmlURL.trimmingCharacters(in: .whitespaces)
         if bml.isEmpty {

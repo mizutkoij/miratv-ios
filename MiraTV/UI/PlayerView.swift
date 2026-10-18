@@ -33,6 +33,9 @@ struct PlayerView: View {
     @State private var hlsNames: [String] = []
     @State private var m2tsNames: [String] = []
     @State private var m2tsModes: [Int] = []
+    /// 音声のみを streamd 経由で再生中か / この画面で streamd が使えなかったか
+    @State private var usingRelay = false
+    @State private var relayFailed = false
     @State private var loadingModes = false
     private let ticker = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
 
@@ -52,8 +55,9 @@ struct PlayerView: View {
     private var webBMLURL: URL? { Servers.webBML.flatMap { BMLURL.make(base: $0, service: current) } }
     private var dataAvailable: Bool { modeID == -1 && webBMLURL != nil }
     private var choices: [PlaybackChoice] {
-        guard allowTranscode else { return [.original, .audioOnly] }
-        return [.original, .audioOnly] + PlaybackChoice.fromHLS(hlsNames) + PlaybackChoice.fromM2TS(m2tsNames)
+        let base: [PlaybackChoice] = [.original, .audioOnly(relay: Servers.streamd != nil)]
+        guard allowTranscode else { return base }
+        return base + PlaybackChoice.fromHLS(hlsNames) + PlaybackChoice.fromM2TS(m2tsNames)
     }
     private var captionAvailable: Bool { !isHLS && engine.info.hasCaption }
 
@@ -104,6 +108,7 @@ struct PlayerView: View {
             setOrientation(.all)
         }
         .onReceive(ticker) { now = $0 }
+        .onChange(of: engine.state) { _, s in handleEngineState(s) }
         .task(id: current.id) {
             await epg.loadDetail(service: current, es: Servers.epgstation, mirakurun: client)
         }
@@ -142,6 +147,7 @@ struct PlayerView: View {
 
     private func startPlayback() {
         engine.audioMode = .both
+        usingRelay = false
         let es = Servers.epgstation
         if isHLS, let es {
             engine.stop()
@@ -158,8 +164,25 @@ struct PlayerView: View {
             hls.stop()
             if isAudioOnly { dataMode = false }
             engine.audioOnly = isAudioOnly
-            engine.play(url: client.streamURL(for: current))
+            // 音声のみは、自前の中継があればそこから（映像を抜いた TS、通信量 約 1/50）。失敗したら Mirakurun の原画質から
+            if isAudioOnly, !relayFailed, let relay = Servers.streamdAudioURL(current) {
+                usingRelay = true
+                engine.play(url: relay)
+            } else {
+                usingRelay = false
+                engine.play(url: client.streamURL(for: current))
+            }
         }
+    }
+
+    /// 中継で開けなかった（streamd が止まっている等）→ 以後この画面では Mirakurun から直接
+    private func handleEngineState(_ s: PlayerEngine.State) {
+        guard case .failed(let msg) = s, usingRelay else { return }
+        DebugLog.log("player", "streamd で開けず、Mirakurun から音声のみで再生: \(msg)")
+        relayFailed = true
+        usingRelay = false
+        engine.audioOnly = true
+        engine.play(url: client.streamURL(for: current))
     }
 
     private func setMode(_ id: Int) {

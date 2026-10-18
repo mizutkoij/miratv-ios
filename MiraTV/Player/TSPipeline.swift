@@ -201,14 +201,17 @@ final class TSPipeline {
 
         videoIndex = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nil, 0)
         audioIndex = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, videoIndex, nil, 0)
-        guard videoIndex >= 0 else { throw PipelineError("映像ストリームが見つかりません") }
+        // 音声のみ（streamd が映像を抜いた TS）は映像が無くてよい
+        guard videoIndex >= 0 || (audioOnly && audioIndex >= 0) else { throw PipelineError("映像ストリームが見つかりません") }
         // 字幕は第 1 言語のみ（映像と同じ番組のもの）。無ければ負の値が返る
         captionIndex = av_find_best_stream(fmt, AVMEDIA_TYPE_SUBTITLE, -1, videoIndex, nil, 0)
 
-        let vst = fmt.pointee.streams[Int(videoIndex)]!
-        videoDec = try openDecoder(vst, video: true)
-        videoTimeBase = vst.pointee.time_base
-        info.videoCodec = String(cString: avcodec_get_name(vst.pointee.codecpar.pointee.codec_id))
+        if videoIndex >= 0 {
+            let vst = fmt.pointee.streams[Int(videoIndex)]!
+            videoDec = try openDecoder(vst, video: true)
+            videoTimeBase = vst.pointee.time_base
+            info.videoCodec = String(cString: avcodec_get_name(vst.pointee.codecpar.pointee.codec_id))
+        }
 
         if audioIndex >= 0 {
             let ast = fmt.pointee.streams[Int(audioIndex)]!
@@ -225,7 +228,7 @@ final class TSPipeline {
         for i in 0..<Int(fmt.pointee.nb_streams) where Int32(i) != videoIndex && Int32(i) != audioIndex && Int32(i) != captionIndex {
             fmt.pointee.streams[i]!.pointee.discard = AVDISCARD_ALL
         }
-        if audioOnly && audioIndex >= 0 {
+        if audioOnly && audioIndex >= 0 && videoIndex >= 0 {
             fmt.pointee.streams[Int(videoIndex)]!.pointee.discard = AVDISCARD_ALL
         }
         // 録画ファイル: 開始時刻・長さ・シーク可否（TvtPlay の「先頭 PCR と末尾 PCR の差」に相当。

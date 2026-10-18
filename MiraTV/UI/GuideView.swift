@@ -99,6 +99,7 @@ struct GuideView: View {
         .task(id: "\(band)-\(dayOffset)-\(epgURL)") {
             await load()
             await reserves.refresh()
+            await prefetchOtherDays()      // 予約の印を先に出してから、残りの日を裏で取る
         }
         .onReceive(ticker) { now = $0 }
         .sheet(item: $selected) { sel in
@@ -275,7 +276,7 @@ struct GuideView: View {
     /// （番組表は 1 日 1MB 前後あり、毎回待つと「接続中」が長い）
     private func load() async {
         let key = cacheKey(dayOffset)
-        if let c = cache[key] { columns = c; errorText = nil; await prefetchOtherDays(); return }
+        if let c = cache[key] { columns = c; errorText = nil; return }
         let diskKey = "guide-" + key
         var showingStale = false
         if let saved = EPGStationClient.cachedSchedules(key: diskKey), !saved.isEmpty {
@@ -289,8 +290,6 @@ struct GuideView: View {
         do {
             columns = try await fetch(dayOffset, es: es)
             errorText = nil
-            loading = false
-            await prefetchOtherDays()
         } catch {
             if !showingStale { errorText = describeError(error) }
             DebugLog.log("net", "番組表の取得に失敗\(showingStale ? "（前回の分で表示中）" : ""): \(describeError(error))")

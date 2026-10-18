@@ -1,0 +1,18 @@
+[Unit]
+Description=MiraTV stream relay (drops unneeded TS packets, no encoding)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/homeserver/miratv-chapterd/streamd.py
+# Tailscale のアドレスだけで待ち受ける（認証なし）
+Environment=HOST=192.0.2.10
+Environment=PORT=23236
+Environment=MIRAKURUN=http://127.0.0.1:40772
+# 再生中は止まると音が切れるので idle にはしない。録画（recpt1/Mirakurun）よりは控えめに
+Nice=5
+MemoryMax=128M
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

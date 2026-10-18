@@ -14,10 +14,15 @@ struct PlaybackChoice: Identifiable, Hashable {
         id: -1, title: "原画質", source: "Mirakurun",
         spec: "MPEG-2 TS · 1440×1080i · 約15Mbps", abilities: "データ放送◯ 5.1ch◯ 主/副音声◯")
 
-    /// 映像をデコードしない（端末側で捨てる）。通信量は原画質と同じだが、CPU・電池をほとんど使わない
-    static let audioOnly = PlaybackChoice(
-        id: -2, title: "音声のみ", source: "Mirakurun",
-        spec: "AAC · 映像はデコードしない · 通信量は原画質と同じ", abilities: "電池の節約 · 字幕◯ 主/副音声◯")
+    /// 音声のみ。relay = 自前の中継（streamd）が映像のパケットを捨てて送る（エンコードなし・通信量 約 1/50）。
+    /// 中継が無ければ、原画質のストリームを受けて端末側で映像を捨てる（通信量は原画質と同じ）
+    static func audioOnly(relay: Bool) -> PlaybackChoice {
+        relay
+            ? PlaybackChoice(id: -2, title: "音声のみ", source: "streamd",
+                             spec: "AAC · 映像を中継で除去 · 約0.3Mbps（エンコードなし）", abilities: "モバイル回線向け · 字幕◯ 主/副音声◯")
+            : PlaybackChoice(id: -2, title: "音声のみ", source: "Mirakurun",
+                             spec: "AAC · 映像はデコードしない · 通信量は原画質と同じ", abilities: "電池の節約 · 字幕◯ 主/副音声◯")
+    }
 
     /// id 1000 以上 = EPGStation の変換 M2TS（index は ESLiveHLSModes.m2tsNames の位置）
     static let m2tsBase = 1000

@@ -11,6 +11,22 @@ enum Servers {
 
     static var chapters: ChapterClient? { ChapterClient(string("chapterURL", Defaults.chapterURL)) }
 
+    /// 自前の中継（streamd）。未設定なら nil（音声のみは Mirakurun の原画質ストリームから映像を捨てる方式になる）
+    static var streamd: URL? {
+        let s = string("streamdURL", Defaults.streamdURL).trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !s.isEmpty, let u = URL(string: s), u.scheme != nil, u.host != nil else { return nil }
+        return u
+    }
+
+    /// streamd の音声だけのストリーム（映像・データ放送の TS パケットを中継で捨てる。約 0.2〜0.4Mbps）
+    static func streamdAudioURL(_ service: MirakurunService) -> URL? {
+        guard let base = streamd,
+              var c = URLComponents(url: base.appending(path: "live/\(service.id)"), resolvingAgainstBaseURL: false) else { return nil }
+        c.queryItems = [URLQueryItem(name: "video", value: "0")]
+        return c.url
+    }
+
     /// web-bml（データ放送）のサーバー。未設定なら nil
     static var webBML: URL? {
         let s = string("webbmlURL", Defaults.webbmlURL).trimmingCharacters(in: .whitespacesAndNewlines)
