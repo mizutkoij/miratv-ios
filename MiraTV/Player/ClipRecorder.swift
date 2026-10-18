@@ -12,6 +12,7 @@ final class ClipRecorder {
     private let writer: AVAssetWriter
     private let videoInput: AVAssetWriterInput
     private let audioInput: AVAssetWriterInput
+    private let channels: Int
     private let url: URL
     private var started = false
     private var firstPTS: CMTime = .invalid
@@ -22,7 +23,9 @@ final class ClipRecorder {
     var onLimit: (() -> Void)?
 
     /// width / height: 書き出す大きさ（表示の縦横比に直したもの）
-    init?(width: Int, height: Int) {
+    /// channels: 入ってくる音声のチャンネル数（2 か 6）。録り始めたときの番組に合わせる
+    init?(width: Int, height: Int, channels: Int = 2) {
+        self.channels = channels == 6 ? 6 : 2
         url = FileManager.default.temporaryDirectory.appendingPathComponent("clip-\(UUID().uuidString).mp4")
         guard let w = try? AVAssetWriter(outputURL: url, fileType: .mp4) else { return nil }
         writer = w
@@ -41,13 +44,24 @@ final class ClipRecorder {
             ],
         ])
         v.expectsMediaDataInRealTime = true
-        // 音声: TSPipeline は常に 48kHz・2ch の float PCM に直して出す（入力は書き始める前に全部足す必要がある）
-        let a = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 48_000,
-            AVNumberOfChannelsKey: 2,
-            AVEncoderBitRateKey: 192_000,
-        ])
+        // 音声: TSPipeline は 48kHz の float PCM（2ch か 5.1ch）で出す（入力は書き始める前に全部足す必要がある）
+        // 書き出し側の並びは AAC の 5.1（C L R Ls Rs LFE）。入ってくる L R C LFE Ls Rs からは AVAssetWriter が並べ替える。
+        // 6ch の AAC を受け付けない端末なら、ステレオにまとめて書く（作れない設定で作ると例外で落ちるので先に確かめる）
+        func audioSettings(_ ch: Int) -> [String: Any] {
+            var layout = AudioChannelLayout()
+            layout.mChannelLayoutTag = ch == 6 ? kAudioChannelLayoutTag_AAC_5_1 : kAudioChannelLayoutTag_Stereo
+            return [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 48_000,
+                AVNumberOfChannelsKey: ch,
+                AVChannelLayoutKey: Data(bytes: &layout, count: MemoryLayout<AudioChannelLayout>.size),
+                AVEncoderBitRateKey: ch == 6 ? 384_000 : 192_000,
+            ]
+        }
+        var settings = audioSettings(self.channels)
+        if self.channels == 6 && !w.canApply(outputSettings: settings, forMediaType: .audio) { settings = audioSettings(2) }
+        guard w.canApply(outputSettings: settings, forMediaType: .audio) else { return nil }
+        let a = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
         a.expectsMediaDataInRealTime = true
         guard writer.canAdd(v), writer.canAdd(a) else { return nil }
         writer.add(v)
@@ -90,6 +104,10 @@ final class ClipRecorder {
         lock.lock(); defer { lock.unlock() }
         guard !finished, started, writer.status == .writing,
               sb.presentationTimeStamp >= firstPTS else { return }
+        // 途中で番組が替わってチャンネル数が変わった分は書かない（形式を変えられないため）
+        if let fd = CMSampleBufferGetFormatDescription(sb),
+           let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fd)?.pointee,
+           Int(asbd.mChannelsPerFrame) != channels { return }
         if audioInput.isReadyForMoreMediaData { audioInput.append(sb) }
     }
 

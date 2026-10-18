@@ -15,6 +15,8 @@ struct MiraTVApp: App {
         DispatchQueue.global(qos: .utility).async { DiskCache.prune() }
         // バックグラウンドやサイレントスイッチ ON でも音を出す
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        // 5.1ch を 5.1ch のまま受け取れる出力（AirPlay の対応機器など）に、まとめずに渡す
+        try? AVAudioSession.sharedInstance().setSupportsMultichannelContent(true)
 
         // DESIGN.md「TabBar」: 地は bg、上に divider の線、選択中は accent・他は text4
         let appearance = UITabBarAppearance()

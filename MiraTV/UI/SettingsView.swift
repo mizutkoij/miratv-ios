@@ -16,6 +16,7 @@ struct SettingsView: View {
     @AppStorage("cmDetection") private var cmDetection = true
     @AppStorage("timeshiftEnabled") private var timeshiftEnabled = true
     @AppStorage("liveActivity") private var liveActivity = true
+    @AppStorage("surround51") private var surround51 = true
 
     @EnvironmentObject private var epg: EPGStore
 
@@ -70,6 +71,14 @@ struct SettingsView: View {
                             .tint(Theme.C.accent)
                             .font(Theme.F.jp(14)).foregroundStyle(Theme.C.text)
                         Text("原画質で見ている間、streamd が直近の放送（既定 30 分）を homeserver のディスクに貯めます。エンコードはしないので CPU はほぼ使いません。チューナーは見ている局の 1 つだけ。閉じて 3 分たつと止まって消えます。")
+                            .font(Theme.F.caption).foregroundStyle(Theme.C.text4)
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("5.1ch の番組を 5.1ch で出す", isOn: $surround51)
+                            .tint(Theme.C.accent)
+                            .font(Theme.F.jp(14)).foregroundStyle(Theme.C.text)
+                        Text("AirPods の空間オーディオや、5.1ch に対応した AirPlay の機器で立体的に鳴ります。iPhone のスピーカーや普通のイヤホンでは iOS がステレオにまとめるので、聞こえ方は今までどおり。次の番組・選局から効きます。")
                             .font(Theme.F.caption).foregroundStyle(Theme.C.text4)
                     }
 

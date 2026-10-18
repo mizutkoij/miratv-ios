@@ -24,6 +24,8 @@ final class TSPipeline {
         /// 表示アスペクト比 (地デジ 1440x1080 SAR 4:3 → 16:9)
         var displayAspect: Double = 16.0 / 9.0
         var audioChannels = 0
+        /// 端末に出しているチャンネル数（2 = ステレオ、6 = 5.1ch）
+        var outputChannels = 2
         var hasAudio = false
         /// ARIB 字幕のストリームが含まれている（FFmpeg は PID の記述子から arib_caption と認識する）
         var hasCaption = false
@@ -90,7 +92,8 @@ final class TSPipeline {
     private var swrInRate: Int32 = 0
     private var swrInFormat: Int32 = -1
     private static let outRate: Int32 = 48_000
-    private static let outChannels: Int32 = 2
+    /// 出力のチャンネル数。5.1ch の番組で「5.1ch で出す」がオンなら 6（L R C LFE Ls Rs）、それ以外は 2
+    private var outChannels: Int32 = 2
     private var audioFormatDesc: CMAudioFormatDescription?
     private var nextAudioPTS: Double?
 
@@ -555,7 +558,7 @@ final class TSPipeline {
         var outOpt = out
         defer { av_frame_free(&outOpt) }
         guard let out else { return }
-        av_channel_layout_default(&out.pointee.ch_layout, Self.outChannels)
+        av_channel_layout_default(&out.pointee.ch_layout, outChannels)
         out.pointee.sample_rate = Self.outRate
         out.pointee.format = AV_SAMPLE_FMT_FLT.rawValue
         guard swr_convert_frame(swr, out, f) >= 0, out.pointee.nb_samples > 0, let data = out.pointee.data.0 else { return }
@@ -567,8 +570,15 @@ final class TSPipeline {
 
     private func rebuildResampler(for f: UnsafeMutablePointer<AVFrame>) -> Bool {
         swr_free(&swr)
+        // 3ch 以上（5.1ch など）は、設定がオンなら 5.1ch のまま出す（AirPods の空間オーディオ・AirPlay の 5.1ch 機器）。
+        // iPhone のスピーカーや普通のイヤホンでは iOS がステレオにまとめる
+        let surround = (UserDefaults.standard.object(forKey: "surround51") as? Bool ?? true)
+            && f.pointee.ch_layout.nb_channels > 2
+        let channels: Int32 = surround ? 6 : 2
+        if channels != outChannels { audioFormatDesc = nil }
+        outChannels = channels
         var outLayout = AVChannelLayout()
-        av_channel_layout_default(&outLayout, Self.outChannels)
+        av_channel_layout_default(&outLayout, outChannels)      // 6 → FL FR FC LFE SL SR
         defer { av_channel_layout_uninit(&outLayout) }
         var r = swr_alloc_set_opts2(&swr, &outLayout, AV_SAMPLE_FMT_FLT, Self.outRate,
                                     &f.pointee.ch_layout, AVSampleFormat(rawValue: f.pointee.format),
@@ -590,6 +600,7 @@ final class TSPipeline {
         swrInRate = f.pointee.sample_rate
         swrInFormat = f.pointee.format
         info.audioChannels = Int(f.pointee.ch_layout.nb_channels)
+        info.outputChannels = Int(outChannels)
         callbacks.info(info)
 
         if audioFormatDesc == nil {
@@ -597,13 +608,17 @@ final class TSPipeline {
                 mSampleRate: Float64(Self.outRate),
                 mFormatID: kAudioFormatLinearPCM,
                 mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-                mBytesPerPacket: UInt32(4 * Self.outChannels),
+                mBytesPerPacket: UInt32(4 * outChannels),
                 mFramesPerPacket: 1,
-                mBytesPerFrame: UInt32(4 * Self.outChannels),
-                mChannelsPerFrame: UInt32(Self.outChannels),
+                mBytesPerFrame: UInt32(4 * outChannels),
+                mChannelsPerFrame: UInt32(outChannels),
                 mBitsPerChannel: 32,
                 mReserved: 0)
-            CMAudioFormatDescriptionCreate(allocator: nil, asbd: &asbd, layoutSize: 0, layout: nil,
+            // チャンネルの並びを付ける（FFmpeg の 5.1 = L R C LFE Ls Rs = MPEG_5_1_A）
+            var layout = AudioChannelLayout()
+            layout.mChannelLayoutTag = outChannels == 6 ? kAudioChannelLayoutTag_MPEG_5_1_A : kAudioChannelLayoutTag_Stereo
+            CMAudioFormatDescriptionCreate(allocator: nil, asbd: &asbd,
+                                           layoutSize: MemoryLayout<AudioChannelLayout>.size, layout: &layout,
                                            magicCookieSize: 0, magicCookie: nil, extensions: nil,
                                            formatDescriptionOut: &audioFormatDesc)
         }
@@ -612,7 +627,7 @@ final class TSPipeline {
 
     private func makeAudioSampleBuffer(_ data: UnsafeMutablePointer<UInt8>, samples: Int, pts: Double) -> CMSampleBuffer? {
         guard let fd = audioFormatDesc else { return nil }
-        let length = samples * 4 * Int(Self.outChannels)
+        let length = samples * 4 * Int(outChannels)
         var block: CMBlockBuffer?
         guard CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: length,
                                                  blockAllocator: nil, customBlockSource: nil, offsetToData: 0,

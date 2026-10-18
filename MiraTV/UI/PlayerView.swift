@@ -437,8 +437,11 @@ struct PlayerView: View {
         if isOneSegMode { return "ワンセグ" }
         switch engine.info.audioChannels {
         case 0: return "原画質"
-        case 6: return "原画質 · 5.1ch"
-        default: return "原画質 · \(engine.info.audioChannels)ch"
+        default:
+            let ch = engine.info.audioChannels
+            let name = ch == 6 ? "5.1ch" : "\(ch)ch"
+            if ch > 2 { return engine.info.outputChannels == 6 ? "原画質 · \(name)" : "原画質 · \(name)→2ch" }
+            return "原画質 · \(name)"
         }
     }
 

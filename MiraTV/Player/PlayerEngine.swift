@@ -99,6 +99,8 @@ final class PlayerEngine: ObservableObject {
         displayLayer.backgroundColor = UIColor.black.cgColor
         synchronizer.addRenderer(audioRenderer)
         synchronizer.addRenderer(videoRenderer)
+        // 5.1ch を AirPods などの空間オーディオで鳴らせるように（ステレオの番組はそのまま）
+        audioRenderer.allowedAudioSpatializationFormats = .multichannel
     }
 
     func play(url: URL, file: Bool = false) {
@@ -280,7 +282,7 @@ final class PlayerEngine: ObservableObject {
         let h = min(CVPixelBufferGetHeight(pb), 1080)
         var w = Int((Double(h) * info.displayAspect).rounded())
         w -= w % 2
-        guard let rec = ClipRecorder(width: w, height: h - h % 2) else { return false }
+        guard let rec = ClipRecorder(width: w, height: h - h % 2, channels: info.outputChannels) else { return false }
         rec.onLimit = onLimit
         frameLock.lock()
         if clip != nil { frameLock.unlock(); rec.cancel(); return false }
