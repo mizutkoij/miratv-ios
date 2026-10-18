@@ -28,9 +28,21 @@ struct NzbFile: Hashable {
     let bytes: Int64?
 
     var ext: String { (name as NSString).pathExtension.lowercased() }
-    /// par2・nfo・sfv などの付属ファイル
+    /// par2・nfo・sfv などの付属ファイル（par2 のボリュームも拡張子は par2）
     var isAuxiliary: Bool {
-        ["par2", "nfo", "sfv", "nzb", "txt", "jpg", "png"].contains(ext) || name.lowercased().contains(".vol")
+        ["par2", "nfo", "sfv", "nzb", "txt", "jpg", "png"].contains(ext)
+    }
+    /// 中身の種類。分割アーカイブ（.7z.001 / .zip.001 / .r00 / .part01.rar）はアーカイブとして扱う
+    var kind: String {
+        let lower = name.lowercased()
+        let e = ext
+        if !e.isEmpty && e.allSatisfy(\.isNumber) {
+            if lower.contains(".7z.") { return "7z" }
+            if lower.contains(".zip.") { return "zip" }
+            if lower.contains(".rar.") { return "rar" }
+        }
+        if e.count == 3, e.hasPrefix("r"), e.dropFirst().allSatisfy(\.isNumber) { return "rar" }
+        return e
     }
 }
 
@@ -107,7 +119,7 @@ struct NzbDlClient {
 
     /// item の中のファイル一覧。name は .nzb 付きでもよい
     func files(itemName name: String) async throws -> [NzbFile] {
-        let folder = name.hasSuffix(".nzb") ? String(name.dropLast(4)) : name
+        let folder = name.lowercased().hasSuffix(".nzb") ? String(name.dropLast(4)) : name
         let json = try await getJSON("api/items/lookup", [URLQueryItem(name: "folder", value: folder)], timeout: 10)
         guard let obj = json as? [String: Any] else { return [] }
         let item = obj["item"] as? [String: Any]

@@ -57,7 +57,11 @@ final class UsenetCatalog: ObservableObject {
 
     /// サーバーの生の一覧（アップロードの新しい順）
     private var raw: [NzbItemRaw] = []
-    private var loadedFromDisk = false
+    /// 初回の全件取得が途中で終わっている（次はその続きから取る）
+    private var partial = false
+    private var loadTask: Task<Void, Never>?
+    /// 取得は画面ではなくここが持つ（タブを切り替えて画面の task が止まっても、最後まで続ける）
+    private var syncTask: Task<Void, Never>?
     private var rebuildGeneration = 0
 
     private init() {}
@@ -68,6 +72,7 @@ final class UsenetCatalog: ObservableObject {
         var raw: [NzbItemRaw]
         var lastSync: Double?
         var total: Int?
+        var partial: Bool?
     }
 
     /// Caches は 10 日で消す仕組み（DiskCache.prune）があるので、Application Support に置く
@@ -78,24 +83,30 @@ final class UsenetCatalog: ObservableObject {
         return d.appendingPathComponent("usenet-catalog.json")
     }
 
-    /// 保存分を読み込む（初回だけ）。一覧の画面を開いたときに呼ぶ
+    /// 保存分を読み込む（初回だけ）。同時に呼ばれても読み込みは 1 回で、全員が読み終わりを待つ
     func loadIfNeeded() async {
-        guard !loadedFromDisk else { return }
-        loadedFromDisk = true
+        if let t = loadTask { await t.value; return }
+        let t = Task { await self.loadFromDisk() }
+        loadTask = t
+        await t.value
+    }
+
+    private func loadFromDisk() async {
         let stored: Stored? = await Task.detached(priority: .userInitiated) {
             guard let data = try? Data(contentsOf: Self.fileURL) else { return nil }
             return try? JSONDecoder().decode(Stored.self, from: data)
         }.value
         guard let stored, raw.isEmpty else { return }
         raw = stored.raw
+        partial = stored.partial ?? false
         lastSync = stored.lastSync.map { Date(timeIntervalSince1970: $0) }
         serverTotal = stored.total
         await rebuild()
-        DebugLog.log("nzb", "保存分の一覧 \(raw.count) 件 → \(entries.count) 番組")
+        DebugLog.log("nzb", "保存分の一覧 \(raw.count) 件 → \(entries.count) 番組\(partial ? "（初回の取得の途中）" : "")")
     }
 
     private func save() {
-        let stored = Stored(raw: raw, lastSync: lastSync?.timeIntervalSince1970, total: serverTotal)
+        let stored = Stored(raw: raw, lastSync: lastSync?.timeIntervalSince1970, total: serverTotal, partial: partial)
         Task.detached(priority: .utility) {
             guard let data = try? JSONEncoder().encode(stored) else { return }
             try? data.write(to: Self.fileURL, options: .atomic)
@@ -104,85 +115,114 @@ final class UsenetCatalog: ObservableObject {
 
     // MARK: - 取得
 
-    /// 新しい分を取り足す。full = true か保存分が無いときは全件を取り直す
+    /// 新しい分を取り足す。full = true か保存分が無いときは全件を取り直す。
+    /// 取得中にもう一度呼ばれたら、新しく始めずに今の取得の終わりを待つ
     func refresh(full: Bool = false) async {
-        guard !syncing else { return }
+        if let t = syncTask { await t.value; return }
         guard let client = Servers.nzbdl else {
             error = "nzb-dl の URL と API キーを設定してください（設定タブ）"
             return
         }
+        // 呼んだ側（画面の task）が止められても、この Task は止まらない
+        let t = Task {
+            await self.runRefresh(client: client, full: full)
+            self.syncTask = nil
+        }
+        syncTask = t
+        await t.value
+    }
+
+    private func runRefresh(client: NzbDlClient, full: Bool) async {
         await loadIfNeeded()
         syncing = true
         defer { syncing = false; progressTotal = nil }
         error = nil
-        var needFull = full || raw.isEmpty
-        // 取り足しで件数が合わなかったら、もう 1 回だけ全件で取り直す
-        for _ in 0..<2 {
-            let mismatch = await sync(client: client, full: needFull)
-            if !mismatch || needFull { break }
+        if full || raw.isEmpty {
+            _ = await sync(client: client, mode: .full)
+            return
+        }
+        // 初回の全件取得が途中で終わっていたら、まずその続き（古い側）を取る
+        if partial {
+            guard await sync(client: client, mode: .resume) != nil else { return }
+        }
+        // 新しい側の差分。件数がサーバーと合わなければ（有効/無効の切り替え等）全件を取り直す
+        if await sync(client: client, mode: .incremental) == true {
             DebugLog.log("nzb", "件数がサーバーと合わない（端末 \(raw.count) / サーバー \(serverTotal ?? -1)）→ 全件取り直し")
-            needFull = true
+            _ = await sync(client: client, mode: .full)
         }
     }
 
-    /// 1 回分の取得。件数がサーバーと合わなければ true
-    private func sync(client: NzbDlClient, full: Bool) async -> Bool {
+    private enum SyncMode: String {
+        /// 先頭から全部
+        case full
+        /// 保存済みの件数の位置から、残り（古い側）を全部
+        case resume
+        /// 先頭から、保存済みの件に届くまで
+        case incremental
+    }
+
+    /// 1 回分の取得。失敗なら nil、件数がサーバーと合わなければ true
+    private func sync(client: NzbDlClient, mode: SyncMode) async -> Bool? {
         let known = Set(raw.map(\.id))
-        var fetched: [NzbItemRaw] = []
-        var seen = Set<String>()
-        var offset = 0
+        var fetched: [NzbItemRaw] = mode == .resume ? raw : []
+        var seen: Set<String> = mode == .resume ? known : []
+        // 続きは保存済みの件数の位置から。上に新しい投稿が増えていると少し重なるが、seen で弾くので取りこぼさない
+        var offset = mode == .resume ? raw.count : 0
         var total: Int?
         var nextPublish = 2_000
         let pageSize = 1_000
-        progressDone = 0
+        progressDone = offset
         progressTotal = serverTotal
         let started = Date()
         do {
             while true {
-                try Task.checkCancellation()
                 let page = try await client.items(limit: pageSize, offset: offset)
                 if let t = page.total { total = t; progressTotal = t }
                 if page.items.isEmpty { break }
                 var hitKnown = false
-                for it in page.items where seen.insert(it.id).inserted {
-                    fetched.append(it)
+                for it in page.items {
                     if known.contains(it.id) { hitKnown = true }
+                    if seen.insert(it.id).inserted { fetched.append(it) }
                 }
                 offset += page.items.count
                 progressDone = offset
-                // 取り足し: 保存済みの件に届いたら、それより古い分は持っている
-                if !full && hitKnown { break }
+                // 差分: 保存済みの件に届いたら、それより古い分は持っている
+                if mode == .incremental && hitKnown { break }
                 if let total, offset >= total { break }
-                // 初回の全件取得は時間がかかるので、途中でも見えるようにする
-                if full && raw.isEmpty && fetched.count >= nextPublish {
+                // 初回の全件取得は時間がかかるので、途中でも見えるようにし、端末にも残す（アプリを閉じても続きから）
+                if mode != .incremental && (raw.isEmpty || partial) && fetched.count >= nextPublish {
                     nextPublish = fetched.count < 20_000 ? 20_000 : fetched.count + 25_000
                     raw = fetched
+                    partial = true
                     await rebuild()
-                    raw = []          // 取得が終わるまでは「保存分なし」のまま扱う
+                    save()
                 }
             }
         } catch {
-            if !(error is CancellationError) { self.error = describeError(error) }
-            DebugLog.log("nzb", "一覧の取得に失敗 offset=\(offset): \(describeError(error))")
-            // 初回で途中まで取れていれば、その分は使えるようにしておく（次の更新で続きを取る）
-            if full && raw.isEmpty && !fetched.isEmpty {
+            self.error = describeError(error)
+            DebugLog.log("nzb", "一覧の取得に失敗（\(mode.rawValue)）offset=\(offset): \(describeError(error))")
+            // 初回の取得なら、取れた分を使えるようにして次は続きから
+            if mode != .incremental && (raw.isEmpty || partial) && !fetched.isEmpty {
                 raw = fetched
+                partial = true
                 await rebuild()
                 save()
             }
-            return false
+            return nil
         }
 
-        if full {
+        switch mode {
+        case .full, .resume:
             raw = fetched
-        } else {
+            partial = false
+        case .incremental:
             raw = fetched.filter { !known.contains($0.id) } + raw
         }
         serverTotal = total
         lastSync = Date()
         await rebuild()
         save()
-        DebugLog.log("nzb", "一覧を\(full ? "全件" : "差分")取得 \(fetched.count) 件 \(String(format: "%.1f", Date().timeIntervalSince(started))) 秒 → 計 \(raw.count) 件")
+        DebugLog.log("nzb", "一覧を取得（\(mode.rawValue)）\(fetched.count) 件 \(String(format: "%.1f", Date().timeIntervalSince(started))) 秒 → 計 \(raw.count) 件")
         if let total, raw.count != total { return true }
         return false
     }

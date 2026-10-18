@@ -134,7 +134,7 @@ struct UsenetPlayerView: View {
         if let e = UsenetCatalog.shared.mainExt(item.id) { return e }
         guard let files = try? await client.files(itemName: item.name),
               let main = NzbDlClient.mainFile(files) else { return nil }
-        let ext = main.ext
+        let ext = main.kind
         if !ext.isEmpty { UsenetCatalog.shared.setMainExt(ext, for: item.id) }
         return ext.isEmpty ? nil : ext
     }
@@ -154,6 +154,7 @@ struct UsenetPlayerView: View {
     private func playMP4(_ item: NzbItemRaw, resume: Double?) {
         mode = .mp4
         engine.stop()
+        resumeAt = nil      // TS から切り替わったとき、TS 用の待ちが残ると閉じるときに位置を保存しなくなる
         // /api/stream/<id> には拡張子が無いので、AVPlayer に中身の種類を教える
         let asset = AVURLAsset(url: client.streamURL(id: item.id),
                                options: [AVURLAssetOverrideMIMETypeKey: "video/mp4"])
