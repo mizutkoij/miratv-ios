@@ -126,6 +126,7 @@ final class PlayerEngine: ObservableObject {
                     self.startTime = info.startTime
                     self.isSeekable = info.isSeekable
                     self.duration = info.duration > 0 ? info.duration : (self.durationHint ?? 0)
+                    if self.isFile { self.pip.refresh() }
                     if self.state == .connecting { self.state = .buffering }
                 }
                 self.setExpectAudio(info.hasAudio)
@@ -155,6 +156,20 @@ final class PlayerEngine: ObservableObject {
                     if let error { self.state = .failed(error.localizedDescription) }
                 }
             })
+        // 録画は PiP にもシークバー・一時停止・スキップを出す（ライブは無し）
+        pip.fileControls = file ? PiPController.FileControls(
+            timeRange: { [weak self] in
+                guard let self else { return CMTimeRange(start: .zero, duration: .zero) }
+                return CMTimeRange(start: CMTime(seconds: self.startTime, preferredTimescale: 90_000),
+                                   duration: CMTime(seconds: max(self.effectiveDuration, 1), preferredTimescale: 90_000))
+            },
+            isPaused: { [weak self] in self?.isPaused ?? false },
+            setPlaying: { [weak self] playing in
+                DispatchQueue.main.async { self?.setPaused(!playing) }
+            },
+            skip: { [weak self] seconds in
+                DispatchQueue.main.async { self?.seek(by: seconds) }
+            }) : nil
         let p = TSPipeline(url: url, callbacks: callbacks)
         p.isFileMode = file
         p.audioOnly = audioOnly
@@ -320,6 +335,7 @@ final class PlayerEngine: ObservableObject {
         clockLock.unlock()
         isPaused = paused
         if started { synchronizer.rate = (paused || isStalled) ? 0 : rate }
+        if isFile { pip.refresh() }
     }
 
     func togglePause() { setPaused(!isPaused) }
@@ -348,6 +364,7 @@ final class PlayerEngine: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.state = .buffering
             self?.reachedEnd = false
+            self?.pip.refresh()
         }
     }
 

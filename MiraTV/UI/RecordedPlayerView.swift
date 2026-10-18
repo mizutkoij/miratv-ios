@@ -369,6 +369,7 @@ struct RecordedPlayerView: View {
                             ControlTile(icon: "captions.bubble", label: "字幕", enabled: engine.info.hasCaption,
                                         active: captionsOn) { toggleCaptions() }
                             ControlTile(icon: "d.circle", label: "データ", enabled: dataURL != nil, active: dataMode) { dataMode = true }
+                            PiPTile(pip: engine.pip, supported: true)
                             ControlTile(icon: "arrow.up.left.and.arrow.down.right", label: "全画面") { requestOrientation(.landscape) }
                         }
                         .padding(.horizontal, 12)
@@ -426,6 +427,7 @@ struct RecordedPlayerView: View {
                         Spacer()
                         CapsuleTile(label: "字幕", enabled: engine.info.hasCaption, active: captionsOn) { toggleCaptions() }
                         CapsuleTile(label: "d", enabled: dataURL != nil, active: dataMode) { dataMode.toggle() }
+                        PiPCapsule(pip: engine.pip, supported: true)
                     }
                     .padding(.horizontal, 16).padding(.vertical, 8)
                     .background(Theme.C.overlayBar)
@@ -457,7 +459,8 @@ struct RecordedPlayerView: View {
         VStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
                 Theme.C.video
-                if let avPlayer { VideoPlayer(player: avPlayer) }
+                // 標準のプレイヤー画面（PiP ボタン付き）。SwiftUI の VideoPlayer には PiP ボタンが出ない
+                if let avPlayer { SystemPlayerView(player: avPlayer) }
                 CircleButton(systemName: "chevron.down", size: 36, fill: Color.black.opacity(0.55),
                              foreground: Theme.C.text) { dismiss() }
                     .padding(12)
@@ -477,5 +480,22 @@ struct RecordedPlayerView: View {
             }
         }
         .background(Theme.C.bg.ignoresSafeArea())
+    }
+}
+
+/// AVPlayerViewController をそのまま使う（変換済み mp4 の録画用）。PiP・AirPlay・シークは標準のまま
+struct SystemPlayerView: UIViewControllerRepresentable {
+    let player: AVPlayer
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let vc = AVPlayerViewController()
+        vc.player = player
+        vc.allowsPictureInPicturePlayback = true
+        vc.canStartPictureInPictureAutomaticallyFromInline = true
+        return vc
+    }
+
+    func updateUIViewController(_ vc: AVPlayerViewController, context: Context) {
+        if vc.player !== player { vc.player = player }
     }
 }
