@@ -14,6 +14,15 @@ struct RecordedPlayerView: View {
     @StateObject private var captions = CaptionController()
     @EnvironmentObject private var radio: RadioPlayer
     @EnvironmentObject private var session: PlaybackSession
+    @EnvironmentObject private var epg: EPGStore
+    @StateObject private var comments = CommentController()
+    @AppStorage("showComments") private var commentsOn = false
+    @State private var nowPlaying = TVNowPlaying()
+    @State private var toast: String?
+    /// 「続きから」で開いたときの位置（「最初から」ボタンを出すため）
+    @State private var resumedFrom: Double?
+    private let clockTicker = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
+    @State private var lastSaved = Date.distantPast
 
     @State private var avPlayer: AVPlayer?
     @State private var dataMode = false
@@ -33,6 +42,8 @@ struct RecordedPlayerView: View {
     @State private var directPending = false
     /// 「もう一度」で開き直したとき、シークできるようになったらこの位置へ戻す
     @State private var resumeAt: Double?
+    /// 字幕の文字の一覧（字幕で探す）
+    @State private var showCaptionText = false
 
     private static let speeds: [Double] = [0.75, 1.0, 1.25, 1.5, 2.0]
 
@@ -77,9 +88,41 @@ struct RecordedPlayerView: View {
         .onChange(of: engine.position) { _, _ in autoSkipIfNeeded() }
         .onChange(of: engine.state) { _, s in handleStateChange(s) }
         .onChange(of: engine.isSeekable) { _, ok in
+            if !useAVPlayer { updateNowPlaying() }
             if ok, let t = resumeAt { resumeAt = nil; engine.seek(to: t) }
         }
+        .onReceive(clockTicker) { _ in onClockTick() }
+        .onChange(of: engine.isPaused) { _, _ in if !useAVPlayer { updateNowPlaying() } }
+        .onChange(of: session.seekRequest) { _, r in
+            // 再生中の録画を、字幕で探すから別の位置で開き直した
+            guard let r, r.recordedId == recorded.id else { return }
+            session.seekRequest = nil
+            seek(to: r.time)
+        }
+        .sheet(isPresented: $showCaptionText) {
+            if let file, let name = file.filename, let client = Servers.chapters {
+                CaptionTextSheet(client: client, videoFileId: file.id, filename: name, recordedId: recorded.id,
+                                 position: currentPosition) { t in
+                    showCaptionText = false
+                    seek(to: t)
+                }
+            }
+        }
+        .task(id: "\(commentsOn)-\(jkID ?? "")") {
+            if commentsOn {
+                comments.loadPast(jkID: jkID, from: recorded.start,
+                                  to: recorded.start.addingTimeInterval(recorded.durationSeconds))
+            } else {
+                comments.stopAll()
+            }
+        }
         .onDisappear {
+            // 続きからの位置へまだ飛んでいない（開いてすぐ閉じた）ときは、前の位置を消さない
+            if resumeAt == nil && currentPosition > 0 {
+                WatchPositions.save(recorded.id, position: currentPosition, duration: currentDuration)
+            }
+            comments.stopAll()
+            nowPlaying.deactivate()
             engine.stop()
             avPlayer?.pause()
             requestOrientation(.all)
@@ -93,11 +136,23 @@ struct RecordedPlayerView: View {
         }
         guard let file else { return }
         let url = es.videoURL(fileId: file.id)
+        // 字幕で探すから開いたらその位置、そうでなければ前回やめた位置（あれば）から
+        var saved = WatchPositions.position(recorded.id)
+        if let r = session.seekRequest, r.recordedId == recorded.id {
+            session.seekRequest = nil
+            saved = r.time
+            showToast("\(clock(r.time)) から再生")
+        } else if let saved { resumedFrom = saved; showToast("続きから再生（\(clock(saved))）") }
         if useAVPlayer {
             let p = AVPlayer(url: url)
             avPlayer = p
+            if let saved { p.seek(to: CMTime(seconds: saved, preferredTimescale: 600)) }
             p.play()
         } else {
+            if let saved { resumeAt = saved }      // シークできるようになったら飛ぶ（既存の仕組み）
+            nowPlaying.activate(onPlay: { engine.setPaused(false); updateNowPlaying() },
+                                onPause: { engine.setPaused(true); updateNowPlaying() },
+                                onSkip: { engine.seek(by: $0); updateNowPlaying() })
             engine.durationHint = recorded.durationSeconds    // libavformat が長さを出せなかったときの代わり
             // 元の TS は EPGStation（Node）を通さず、homeserver のファイルを直接読む。
             // 使えるかを先に HEAD で確かめると毎回最大 4 秒待つので、使える前提でいきなり開き、
@@ -223,6 +278,11 @@ struct RecordedPlayerView: View {
                 .aspectRatio(engine.info.displayAspect, contentMode: .fit)
                 .opacity(captionsOn ? 1 : 0)
                 .allowsHitTesting(false)
+            if commentsOn {
+                CommentOverlay(controller: comments)
+                    .aspectRatio(engine.info.displayAspect, contentMode: .fit)
+                    .allowsHitTesting(false)
+            }
             if dataMode, let dataURL {
                 BMLWebView(url: dataURL, controller: bml).aspectRatio(16.0 / 9.0, contentMode: .fit)
                 if let r = bml.videoRect {
@@ -235,7 +295,102 @@ struct RecordedPlayerView: View {
                 }
             }
             stateOverlay
+            toastLayer
         }
+    }
+
+    // MARK: - 実況・キャプチャ・続きから・ロック画面
+
+    /// 録画した局の実況 ID
+    private var jkID: String? {
+        guard let cid = recorded.channelId, let ch = epg.channelInfo[cid] else { return nil }
+        return JikkyoChannel.id(name: ch.name, serviceId: ch.serviceId, type: ch.channelType)
+    }
+
+    /// いまの再生位置（秒、先頭 = 0）
+    private var currentPosition: Double {
+        if useAVPlayer { return avPlayer?.currentTime().seconds ?? 0 }
+        return engine.position
+    }
+
+    private var currentDuration: Double {
+        if useAVPlayer, let d = avPlayer?.currentItem?.duration.seconds, d.isFinite { return d }
+        return engine.duration > 0 ? engine.duration : recorded.durationSeconds
+    }
+
+    /// 0.25 秒ごと: 実況を再生位置に合わせて流す・5 秒ごとに位置を保存・ロック画面の表示
+    private func onClockTick() {
+        let pos = currentPosition
+        guard pos.isFinite else { return }
+        let paused = useAVPlayer ? (avPlayer?.rate ?? 0) == 0 : engine.isPaused
+        if commentsOn && !paused {
+            // TS の先頭 ≒ 録画の開始時刻（EPGStation の startAt）。数秒ずれることがある
+            comments.tick(broadcastTime: recorded.start.timeIntervalSince1970 + pos)
+        }
+        if Date().timeIntervalSince(lastSaved) > 5 && pos > 0 {
+            lastSaved = Date()
+            WatchPositions.save(recorded.id, position: pos, duration: currentDuration)
+            if !useAVPlayer { updateNowPlaying() }
+        }
+    }
+
+    private func updateNowPlaying() {
+        let ch = recorded.channelId.flatMap { epg.channelInfo[$0]?.name } ?? "録画"
+        nowPlaying.update(title: recorded.name ?? "", channel: ch, artworkURL: nil, isLive: false,
+                          position: engine.position, duration: currentDuration,
+                          rate: engine.isPaused ? 0 : engine.playbackRate)
+    }
+
+    private func restartFromBeginning() {
+        resumedFrom = nil
+        WatchPositions.save(recorded.id, position: 0, duration: currentDuration)
+        if useAVPlayer { avPlayer?.seek(to: .zero) } else { resumeAt = nil; engine.seek(to: 0) }
+    }
+
+    /// 位置へ飛ぶ（TS はシークできるようになるまで待つ）
+    private func seek(to t: Double) {
+        resumedFrom = nil
+        if useAVPlayer {
+            avPlayer?.seek(to: CMTime(seconds: t, preferredTimescale: 600))
+        } else if engine.isSeekable {
+            resumeAt = nil
+            engine.seek(to: t)
+        } else {
+            resumeAt = t
+        }
+    }
+
+    /// 字幕の文字を出せるか（TS で、homeserver の chapterd がある）
+    private var captionTextAvailable: Bool {
+        !useAVPlayer && recorded.isRecording != true && file?.filename != nil && Servers.chapters != nil
+    }
+
+    private func capture() {
+        guard let img = engine.captureImage() else { showToast("まだ映像がありません"); return }
+        Task { showToast(await CaptureSaver.save(img)) }
+    }
+
+    @ViewBuilder private var toastLayer: some View {
+        if let toast {
+            HStack(spacing: 10) {
+                Text(toast).font(Theme.F.jp(13, .bold)).foregroundStyle(Theme.C.text)
+                if resumedFrom != nil, toast.hasPrefix("続きから") {
+                    Button("最初から") { restartFromBeginning(); withAnimation { self.toast = nil } }
+                        .font(Theme.F.jp(13, .bold)).foregroundStyle(Theme.C.accent)
+                }
+            }
+            .padding(.horizontal, 14).padding(.vertical, 8)
+            .background(Color.black.opacity(0.75), in: Capsule())
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .padding(.bottom, 12)
+            .transition(.opacity)
+        }
+    }
+
+    private func showToast(_ s: String, seconds: Double = 4) {
+        withAnimation { toast = s }
+        let shown = s
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { if toast == shown { withAnimation { toast = nil } } }
     }
 
     @ViewBuilder private var stateOverlay: some View {
@@ -400,6 +555,18 @@ struct RecordedPlayerView: View {
                                 cmSkipButton()
                                 Text(cmStatus).font(Theme.F.caption).foregroundStyle(Theme.C.text4).lineLimit(1)
                                 Spacer(minLength: 0)
+                                if captionTextAvailable {
+                                    Button { showCaptionText = true } label: {
+                                        HStack(spacing: 5) {
+                                            Image(systemName: "text.magnifyingglass")
+                                            Text("字幕で探す")
+                                        }
+                                        .font(Theme.F.jp(13, .bold)).foregroundStyle(Theme.C.text)
+                                        .padding(.horizontal, 12).frame(height: 36)
+                                        .background(Theme.C.surface, in: Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
                             }
                         }
                         .padding(.horizontal, 20).padding(.top, 12)
@@ -408,6 +575,8 @@ struct RecordedPlayerView: View {
                             ControlTile(icon: "captions.bubble", label: "字幕", enabled: engine.info.hasCaption,
                                         active: captionsOn) { toggleCaptions() }
                             ControlTile(icon: "d.circle", label: "データ", enabled: dataURL != nil, active: dataMode) { dataMode = true }
+                            ControlTile(icon: "text.bubble", label: "実況", enabled: jkID != nil, active: commentsOn) { commentsOn.toggle() }
+                            ControlTile(icon: "camera", label: "写真") { capture() }
                             PiPTile(pip: engine.pip, supported: true)
                             ControlTile(icon: "arrow.up.left.and.arrow.down.right", label: "全画面") { requestOrientation(.landscape) }
                         }
@@ -465,6 +634,9 @@ struct RecordedPlayerView: View {
                         Text(recorded.name ?? "").font(Theme.F.jp(17, .bold)).foregroundStyle(Theme.C.text).lineLimit(1)
                         Spacer()
                         CapsuleTile(label: "字幕", enabled: engine.info.hasCaption, active: captionsOn) { toggleCaptions() }
+                        CapsuleTile(label: "実況", enabled: jkID != nil, active: commentsOn) { commentsOn.toggle() }
+                        CapsuleTile(label: "写真") { capture() }
+                        if captionTextAvailable { CapsuleTile(label: "文字") { showCaptionText = true } }
                         CapsuleTile(label: "d", enabled: dataURL != nil, active: dataMode) { dataMode.toggle() }
                         PiPCapsule(pip: engine.pip, supported: true)
                     }
@@ -500,6 +672,12 @@ struct RecordedPlayerView: View {
                 Theme.C.video
                 // 標準のプレイヤー画面（PiP ボタン付き）。SwiftUI の VideoPlayer には PiP ボタンが出ない
                 if let avPlayer { SystemPlayerView(player: avPlayer) }
+                if commentsOn {
+                    CommentOverlay(controller: comments)
+                        .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                        .allowsHitTesting(false)
+                }
+                toastLayer
                 CircleButton(systemName: "chevron.down", size: 36, fill: Color.black.opacity(0.55),
                              foreground: Theme.C.text) { session.minimize() }
                     .padding(12)

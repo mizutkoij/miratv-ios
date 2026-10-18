@@ -27,6 +27,26 @@ enum Servers {
         return c.url
     }
 
+    /// streamd の追っかけ用バッファ（/timeshift/<局>/...）
+    static func timeshiftURL(_ service: MirakurunService, _ action: String, from: Double? = nil, bufferID: Int64? = nil) -> URL? {
+        guard let base = streamd,
+              var c = URLComponents(url: base.appending(path: "timeshift/\(service.id)/\(action)"), resolvingAgainstBaseURL: false)
+        else { return nil }
+        var q = [URLQueryItem(name: "client", value: deviceID)]
+        if let from { q.append(URLQueryItem(name: "from", value: String(format: "%.1f", from))) }
+        if let bufferID { q.append(URLQueryItem(name: "id", value: String(bufferID))) }
+        c.queryItems = q
+        return c.url
+    }
+
+    /// この端末の ID（streamd が「どの端末が見ているか」を数えるため。中身に意味はない）
+    static var deviceID: String {
+        if let s = UserDefaults.standard.string(forKey: "deviceID") { return s }
+        let s = UUID().uuidString
+        UserDefaults.standard.set(s, forKey: "deviceID")
+        return s
+    }
+
     /// web-bml（データ放送）のサーバー。未設定なら nil
     static var webBML: URL? {
         let s = string("webbmlURL", Defaults.webbmlURL).trimmingCharacters(in: .whitespacesAndNewlines)

@@ -14,7 +14,12 @@ API (bound to the Tailscale address only, no auth, read-only):
   GET /raw?name=<video file name>   -> the recording itself, with HTTP Range (direct playback, bypasses EPGStation/Node)
   GET /chapters/<videoFileId>?name=<video file name>
       -> {"status": "pending|running|ready|error", "progress": 0..1, "duration": s, "cm": [[start, end], ...]}
+  GET /captions/<videoFileId>?name=<video file name>
+      -> {"status": ..., "progress": 0..1, "captions": [[t, "text"], ...]}  (closed captions as text, for search)
+  GET /captions/search?q=<words>  -> {"indexed": n, "results": [{"id": videoFileId, "name": ..., "hits": [[t, text]]}]}
+      searches every recording whose captions were already pulled out
   GET /health
+(captions need arib_caption.py + arib_tables.json next to this file)
 Positions are seconds from the start of the file (ffmpeg zero-bases the stream), which is the same timeline the
 app uses (PTS - stream start_time).
 """
@@ -25,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -42,9 +48,15 @@ MIN_GAPS = 2       # at least two consecutive spots
 MAX_SPOT_MULT = 8  # up to 120 s single spot
 MERGE_GAP = 20.0   # CM blocks closer than this are one break (a single missed silence leaves a 15 s hole)
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import arib_caption  # noqa: E402
+
+CAPTION_ALGO = 1
+
 lock = threading.Lock()
 jobs = {}          # videoFileId -> dict(status, progress, duration, cm, path, error)
-queue = []         # videoFileIds waiting for the single worker
+cjobs = {}         # videoFileId -> dict(status, progress, path, error)  (captions)
+queue = []         # (kind, videoFileId) waiting for the single worker; kind = "cm" | "captions"
 wake = threading.Event()
 
 
@@ -185,9 +197,17 @@ def worker():
                 if not queue:
                     wake.clear()
                     break
-                vid = queue.pop(0)
-                job = jobs[vid]
+                kind, vid = queue.pop(0)
+                job = (jobs if kind == "cm" else cjobs).get(vid)
+                if job is None or job["status"] != "pending":
+                    continue                       # 同じものが 2 回並んでいた（もう済んだ・走っている）
                 job["status"] = "running"
+            if kind == "captions":
+                try:
+                    run_captions(vid, job)
+                except Exception as e:  # noqa: BLE001  1 件の失敗で作業の列ごと止めない
+                    log("captions crashed", vid, e)
+                continue
             try:
                 result = analyze(vid, job["path"])
                 save_cache(vid, job["path"], result)
@@ -217,9 +237,109 @@ def request_chapters(vid, name):
     job = {"status": "pending", "progress": 0.0, "duration": 0.0, "cm": [], "path": path}
     with lock:
         jobs[vid] = job
-        queue.append(vid)
+        queue.append(("cm", vid))
     wake.set()
     return dict(job)
+
+
+# ---- captions (text only, for search) -------------------------------------------------------------------------
+
+def caption_path(vid):
+    return os.path.join(CACHE, "captions", f"{vid}.json")
+
+
+def load_captions(vid, path=None):
+    try:
+        with open(caption_path(vid), encoding="utf-8") as f:
+            c = json.load(f)
+        if c.get("algo") != CAPTION_ALGO:
+            return None
+        if path is not None:
+            st = os.stat(path)
+            if c.get("size") != st.st_size:
+                # 録画中（まだ伸びている）なら、取り出した分をそのまま返す。録画が終わって落ち着いたら 1 回だけ取り直す
+                growing = time.time() - st.st_mtime < 120
+                if not (growing and os.path.getmtime(caption_path(vid)) > time.time() - 600):
+                    return None
+        return c
+    except Exception:
+        return None
+
+
+def run_captions(vid, job):
+    def progress(x):
+        with lock:
+            job["progress"] = x
+    try:
+        log("captions start", vid, os.path.basename(job["path"]))
+        size = os.stat(job["path"]).st_size        # 読む前の大きさ（録画中のファイルは読んでいる間に伸びる）
+        r = arib_caption.extract(job["path"], progress)
+        data = {"algo": CAPTION_ALGO, "size": size, "name": os.path.basename(job["path"]),
+                "rid": job.get("rid"), "captions": r["captions"]}
+        os.makedirs(os.path.dirname(caption_path(vid)), exist_ok=True)
+        tmp = caption_path(vid) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, caption_path(vid))
+        with lock:
+            cjobs.pop(vid, None)               # 次からはファイルから返す（メモリに抱えない）
+        log("captions done", vid, "lines:", len(r["captions"]), "(no caption stream)" if r["caption_pid"] is None else "")
+    except Exception as e:  # noqa: BLE001
+        log("captions failed", vid, e)
+        with lock:
+            job.update(status="error", error=str(e))
+
+
+def request_captions(vid, name, rid=None):
+    with lock:
+        job = cjobs.get(vid)
+        if job and job["status"] in ("pending", "running"):
+            return dict(job)
+    path = find_file_cached(name)
+    if not path:
+        return {"status": "error", "error": "file not found"}
+    cached = load_captions(vid, path)
+    if cached:
+        return {"status": "ready", "progress": 1.0, "captions": cached["captions"]}
+    job = {"status": "pending", "progress": 0.0, "path": path, "rid": rid}
+    with lock:
+        cur = cjobs.get(vid)                   # 調べている間に別の要求が先に並べていたら、そちらを返す
+        if cur and cur["status"] in ("pending", "running"):
+            return dict(cur)
+        cjobs[vid] = job
+        queue.append(("captions", vid))
+    wake.set()
+    return dict(job)
+
+
+def norm(text):
+    """For matching: NFKC, case-folded, katakana -> hiragana, no spaces."""
+    t = unicodedata.normalize("NFKC", text).casefold()
+    t = "".join(chr(ord(c) - 0x60) if "ァ" <= c <= "ヶ" else c for c in t)
+    return re.sub(r"\s+", "", t)
+
+
+def search_captions(q, limit=200):
+    """取り出し済みのファイルを毎回読んで探す（メモリに抱えない。数百本でも数十 MB を読むだけ、OS のキャッシュに乗る）"""
+    words = [norm(w) for w in re.split(r"\s+", q.strip()) if w]
+    if not words:
+        return {"indexed": 0, "results": []}
+    d = os.path.join(CACHE, "captions")
+    try:
+        names = [n for n in os.listdir(d) if n.endswith(".json") and n[:-5].isdigit()]
+    except FileNotFoundError:
+        names = []
+    results = []
+    for n in names:
+        vid = int(n[:-5])
+        c = load_captions(vid)
+        if not c:
+            continue
+        hits = [[t, x] for t, x in c["captions"] if all(w in norm(x) for w in words)]
+        if hits:
+            results.append({"id": vid, "rid": c.get("rid"), "name": c.get("name", ""), "hits": hits[:50], "count": len(hits)})
+    results.sort(key=lambda r: -r["id"])           # newer recordings first
+    return {"indexed": len(names), "results": results[:limit]}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -321,6 +441,16 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/health":
             with lock:
                 return self._json({"ok": True, "queue": len(queue), "jobs": len(jobs)})
+        if u.path == "/captions/search":
+            q = urllib.parse.parse_qs(u.query).get("q", [""])[0]
+            return self._json(search_captions(q))
+        m = re.fullmatch(r"/captions/(\d+)", u.path)
+        if m:
+            qs = urllib.parse.parse_qs(u.query)
+            rid = qs.get("rid", [""])[0]
+            res = request_captions(int(m.group(1)), qs.get("name", [""])[0], int(rid) if rid.isdigit() else None)
+            res.pop("path", None)
+            return self._json(res)
         m = re.fullmatch(r"/chapters/(\d+)", u.path)
         if m:
             name = urllib.parse.parse_qs(u.query).get("name", [""])[0]

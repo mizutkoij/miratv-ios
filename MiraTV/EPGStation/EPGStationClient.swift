@@ -284,6 +284,10 @@ struct EPGStationClient {
         return (recs, r.total ?? recs.count)
     }
 
+    func recordedItem(id: Int) async throws -> ESRecorded {
+        try await get("api/recorded/\(id)", ["isHalfWidth": "true"])
+    }
+
     func rules() async throws -> [ESRule] {
         struct R: Decodable { let rules: [LossyDecodable<ESRule>] }
         let r: R = try await get("api/rules", ["limit": "100"])

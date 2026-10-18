@@ -19,6 +19,7 @@ struct RecordingsView: View {
     @State private var loading = false
     @State private var ruleToDelete: ESRule?
     @State private var now = Date()
+    @State private var showCaptionSearch = false
     private let ticker = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     private var es: EPGStationClient? { EPGStationClient(epgURL) }
@@ -33,7 +34,13 @@ struct RecordingsView: View {
             Theme.C.bg.ignoresSafeArea()
             VStack(alignment: .leading, spacing: 0) {
                 ScreenHeader(title: "録画", status: statusLine) {
-                    CircleButton(systemName: "arrow.clockwise") { Task { await load(force: true) } }
+                    HStack(spacing: 8) {
+                        if Servers.chapters != nil {
+                            CircleButton(systemName: "text.magnifyingglass") { showCaptionSearch = true }
+                                .accessibilityLabel("字幕で探す")
+                        }
+                        CircleButton(systemName: "arrow.clockwise") { Task { await load(force: true) } }
+                    }
                 }
                 SegmentedPills(options: Segment.allCases, label: { $0.rawValue }, selection: $segment)
                     .padding(.horizontal, 12).padding(.bottom, 10)
@@ -53,6 +60,11 @@ struct RecordingsView: View {
         }
         .task(id: "\(segment.rawValue)-\(epgURL)") { await load(force: false) }
         .onReceive(ticker) { now = $0 }
+        .sheet(isPresented: $showCaptionSearch) {
+            if let es, let c = Servers.chapters {
+                CaptionSearchSheet(client: c, es: es, recordings: recorded)
+            }
+        }
         .confirmationDialog("このルールを削除しますか？", isPresented: Binding(get: { ruleToDelete != nil }, set: { if !$0 { ruleToDelete = nil } }),
                             titleVisibility: .visible) {
             Button("ルールを削除", role: .destructive) {
@@ -154,6 +166,19 @@ struct RecordingsView: View {
                 }
                 .frame(width: 136, height: 76)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                // どこまで見たか（続きから再生できる録画だけ）
+                .overlay(alignment: .bottom) {
+                    if let p = WatchPositions.progress(rec.id, duration: rec.durationSeconds) {
+                        GeometryReader { g in
+                            ZStack(alignment: .leading) {
+                                Rectangle().fill(Color.black.opacity(0.5))
+                                Rectangle().fill(Theme.C.accent).frame(width: g.size.width * p)
+                            }
+                        }
+                        .frame(height: 3)
+                        .clipShape(RoundedRectangle(cornerRadius: 1.5))
+                    }
+                }
                 Text(duration(rec.durationSeconds)).font(Theme.F.mono(10, .medium)).foregroundStyle(.white)
                     .padding(.horizontal, 4).background(Color.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 3))
                     .padding(4)

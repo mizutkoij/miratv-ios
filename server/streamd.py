@@ -13,6 +13,20 @@ per viewer (packet header parsing in Python).
                                         (video / audio / caption / data / si) -- to see what is worth dropping
   GET /health
 
+Timeshift ("追っかけ再生"): keep the last N minutes of a service on disk while someone is watching, so the app
+can pause / rewind live TV. No decoding or encoding: the TS bytes are appended to 32 MB segment files and old
+segments are deleted. The buffer stops by itself when nobody has touched it for TIMESHIFT_IDLE seconds (so the
+tuner is released).
+
+  GET  /timeshift/<serviceId>/start          start (or keep) buffering      -> info JSON
+  GET  /timeshift/<serviceId>/info           {"bytes", "base", "seconds", "available_from", "bitrate"}
+  GET  /timeshift/<serviceId>/play?from=S    stream from S seconds after the buffer started, then keep following
+                                             the live edge (like /live). Seeking = open again with another S.
+  GET  /timeshift/<serviceId>/stop
+
+(Serving the buffer as a growing Range file was tried first: libavformat's http stops at the Content-Length it saw
+and reconnect_at_eof does not read past it, so the player could not follow the live edge.)
+
 The PMT is rewritten to list only the kept elementary streams (and the CRC recomputed), so the player does not
 wait for streams that never arrive. If a PMT spans more than one TS packet, it is forwarded unchanged.
 Bound to the Tailscale address only, no auth (same as chapterd).
@@ -20,6 +34,8 @@ Bound to the Tailscale address only, no auth (same as chapterd).
 import json
 import math
 import os
+import re
+import shutil
 import threading
 import time
 import urllib.parse
@@ -38,6 +54,201 @@ PES_PRIVATE = 0x06          # ARIB captions / superimpose are PES private data (
 
 viewers = 0
 viewers_lock = threading.Lock()
+
+TS_DIR = os.environ.get("TIMESHIFT_DIR", os.path.expanduser("~/miratv-timeshift"))
+TS_MINUTES = float(os.environ.get("TIMESHIFT_MINUTES", "30"))
+TS_IDLE = float(os.environ.get("TIMESHIFT_IDLE", "180"))
+# セグメントの大きさは 188（TS パケット）の倍数にする。でないと消したあとの残りの先頭がパケットの途中になる
+TS_SEG = int(float(os.environ.get("TIMESHIFT_SEG_MB", "32")) * 1024 * 1024) // 188 * 188
+# 見ている端末がこの秒数 start を呼ばなければ、その端末はもう見ていないとみなす（stop が来なかったとき用）
+TS_CLIENT_TTL = 20
+timeshifts = {}
+timeshifts_lock = threading.Lock()
+
+
+class Timeshift:
+    """1 局ぶんの追っかけ用バッファ。Mirakurun から受けた TS をそのまま 32MB ごとのファイルに足していく"""
+
+    def __init__(self, sid):
+        self.sid = sid
+        self.t0 = time.time()
+        # バッファごとに別のフォルダ（止まりかけの古いバッファの後片付けが、新しいバッファを消さないように）
+        self.id = int(self.t0 * 1000)
+        self.dir = os.path.join(TS_DIR, f"{sid}-{self.id}")
+        os.makedirs(self.dir, exist_ok=True)
+        self.size = 0                # 書いた総バイト数（= 仮想ファイルの長さ）
+        self.base = 0                # まだ残っている最初のバイト（それより前は消した）
+        self.clients = {}            # 端末 ID -> 最後に start を呼んだ時刻
+        self.readers = 0             # いま開いている play の数
+        self.seg_start_time = {}     # segment index -> 書き始めた時刻
+        self.touched = time.time()
+        self.stopped = False
+        self.error = None
+        self.cond = threading.Condition()
+        threading.Thread(target=self._run, name=f"timeshift-{sid}", daemon=True).start()
+        log(f"timeshift start service={sid} dir={self.dir} keep={TS_MINUTES:.0f}min")
+
+    def touch(self, client=None):
+        self.touched = time.time()
+        if client:
+            self.clients[client] = self.touched
+
+    def release(self, client):
+        """その端末はもう見ない。ほかに見ている端末も play も無ければ止める"""
+        now = time.time()
+        self.clients.pop(client, None)
+        alive = [c for c, at in list(self.clients.items()) if now - at < TS_CLIENT_TTL]
+        if not alive and self.readers == 0:
+            self.stopped = True
+            with self.cond:
+                self.cond.notify_all()
+        return self.stopped
+
+    def _path(self, k):
+        return os.path.join(self.dir, f"{k:06d}.ts")
+
+    def _run(self):
+        src = f"{MIRAKURUN}/api/services/{self.sid}/stream?decode=1"
+        req = urllib.request.Request(src, headers={"X-Mirakurun-Priority": "0", "User-Agent": "miratv-streamd/timeshift"})
+        f = None
+        k = -1
+        try:
+            with urllib.request.urlopen(req, timeout=15) as up:
+                while not self.stopped:
+                    if time.time() - self.touched > TS_IDLE:
+                        log(f"timeshift idle, stopping service={self.sid}")
+                        break
+                    buf = up.read(CHUNK)
+                    if not buf:
+                        break
+                    view = memoryview(buf)
+                    while len(view):
+                        seg = self.size // TS_SEG
+                        if seg != k:
+                            if f:
+                                f.close()
+                            k = seg
+                            f = open(self._path(k), "ab")
+                            self.seg_start_time[k] = time.time()
+                        room = (k + 1) * TS_SEG - self.size
+                        part = view[:room]
+                        f.write(part)
+                        f.flush()
+                        with self.cond:
+                            self.size += len(part)
+                            self.cond.notify_all()
+                        view = view[len(part):]
+                    self._trim(k)
+        except Exception as e:
+            self.error = str(e)
+            log(f"timeshift error service={self.sid}: {e}")
+        finally:
+            if f:
+                f.close()
+            with self.cond:
+                self.stopped = True
+                self.cond.notify_all()
+            shutil.rmtree(self.dir, ignore_errors=True)
+            with timeshifts_lock:
+                if timeshifts.get(self.sid) is self:
+                    del timeshifts[self.sid]
+            log(f"timeshift end service={self.sid} wrote={self.size / 1e6:.0f}MB")
+
+    def _trim(self, current):
+        """TS_MINUTES より前に書き終わったセグメントを消す（書いている途中のものは残す）"""
+        limit = time.time() - TS_MINUTES * 60
+        first = self.base // TS_SEG
+        while first < current:
+            nxt = self.seg_start_time.get(first + 1)
+            if nxt is None or nxt > limit:
+                break
+            try:
+                os.remove(self._path(first))
+            except OSError:
+                pass
+            first += 1
+            with self.cond:
+                self.seg_start_time.pop(first - 1, None)
+                self.base = first * TS_SEG
+
+    def seconds_at(self, offset):
+        """そのバイトが書かれたおおよその時刻（バッファ開始からの秒）。セグメントの書き始め時刻の間を線形に"""
+        with self.cond:
+            sts = dict(self.seg_start_time)
+        k = offset // TS_SEG
+        t_k = sts.get(k)
+        if t_k is None:
+            return max(time.time() - self.t0, 0)
+        frac_bytes = offset - k * TS_SEG
+        t_next = sts.get(k + 1)
+        if t_next is not None:
+            t = t_k + (t_next - t_k) * frac_bytes / TS_SEG
+        else:                                   # 書いている途中のセグメント
+            written = max(self.size - k * TS_SEG, 1)
+            t = t_k + (time.time() - t_k) * min(frac_bytes / written, 1)
+        return max(t - self.t0, 0)
+
+    def info(self):
+        elapsed = time.time() - self.t0
+        return {"service": int(self.sid), "id": self.id, "bytes": self.size, "base": self.base,
+                "seconds": round(elapsed, 1), "available_from": round(self.seconds_at(self.base), 1),
+                "bitrate": round(self.size * 8 / max(elapsed, 0.001)), "stopped": self.stopped, "error": self.error}
+
+    def offset_at(self, seconds):
+        """バッファ開始から seconds 秒の位置のバイト（188 の倍数に丸める）。消した部分より前なら最初の残り"""
+        target = self.t0 + max(seconds, 0)
+        with self.cond:                         # _trim と同時に読まない（途中で消えたキーで落ちないように）
+            sts = dict(self.seg_start_time)
+            size, base = self.size, self.base
+        ks = sorted(sts)
+        off = base
+        for i, k in enumerate(ks):
+            t_k = sts[k]
+            t_next = sts.get(k + 1, time.time())
+            seg_bytes = TS_SEG if k + 1 in sts else max(size - k * TS_SEG, 0)
+            if target < t_k:
+                off = k * TS_SEG
+                break
+            if target <= t_next or i == len(ks) - 1:
+                frac = 0 if t_next <= t_k else min((target - t_k) / (t_next - t_k), 1)
+                off = k * TS_SEG + int(seg_bytes * frac)
+                break
+        off = max(min(off, size), base)
+        return max(off - off % 188, base)       # base は 188 の倍数（TS_SEG が 188 の倍数なので）
+
+    def wait_for(self, offset, timeout):
+        with self.cond:
+            self.cond.wait_for(lambda: self.size > offset or self.stopped, timeout)
+            return self.size
+
+    def read(self, start, length):
+        """[start, start+length) を読む（消した部分は呼び出し側で base 以降に寄せておく）"""
+        out = bytearray()
+        pos = start
+        while len(out) < length:
+            k = pos // TS_SEG
+            try:
+                with open(self._path(k), "rb") as f:
+                    f.seek(pos - k * TS_SEG)
+                    chunk = f.read(min(length - len(out), (k + 1) * TS_SEG - pos))
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+            pos += len(chunk)
+        return bytes(out)
+
+
+def get_timeshift(sid, create):
+    with timeshifts_lock:
+        t = timeshifts.get(sid)
+        if t is None and create:
+            t = Timeshift(sid)
+            timeshifts[sid] = t
+        if t:
+            t.touch()
+        return t
 
 
 def log(*a):
@@ -246,6 +457,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         parts = u.path.strip("/").split("/")
+        if parts and parts[0] == "timeshift":
+            return self._timeshift(parts[1:], head=False)
         if len(parts) != 2 or parts[0] not in ("live", "probe") or not parts[1].isdigit():
             self.send_error(404)
             return
@@ -346,7 +559,91 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def _ts_json(handler, obj, status=200):
+    body = json.dumps(obj, ensure_ascii=False).encode()
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def _timeshift(self, parts, head):
+    if not parts or not parts[0].isdigit():
+        self.send_error(404)
+        return
+    sid = parts[0]
+    action = parts[1] if len(parts) > 1 else ""
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+    client = q.get("client", [""])[0][:64]
+    if action == "start":
+        t = get_timeshift(sid, True)
+        t.touch(client)
+        return _ts_json(self, t.info())
+    if action == "info":
+        t = get_timeshift(sid, False)
+        return _ts_json(self, t.info() if t else {"service": int(sid), "running": False}, 200 if t else 404)
+    if action == "stop":
+        # 端末ごと。ほかの端末が同じ局を見ている・追っかけ再生中なら止めない
+        with timeshifts_lock:
+            t = timeshifts.get(sid)
+        stopped = t.release(client) if t else True
+        return _ts_json(self, {"stopped": stopped})
+    if action != "play":
+        self.send_error(404)
+        return
+    # play は新しくバッファを作らない（無い・別のバッファになっていたら 404。アプリはライブに戻る）
+    t = get_timeshift(sid, False)
+    want = q.get("id", [""])[0]
+    if t is None or (want and want != str(t.id)):
+        return _ts_json(self, {"error": "no timeshift buffer", "id": t.id if t else None}, 404)
+    try:
+        frm = float(q.get("from", ["0"])[0])
+    except ValueError:
+        frm = 0
+    if not math.isfinite(frm):
+        frm = 0
+    pos = t.offset_at(frm)
+    log(f"timeshift play service={sid} from={frm:.1f}s byte={pos} of {t.size}")
+    self.send_response(200)
+    self.send_header("Content-Type", "video/mp2t")
+    self.send_header("Cache-Control", "no-store")
+    self.send_header("X-Timeshift-From", f"{t.seconds_at(pos):.2f}")     # 実際に出し始めた位置（秒）
+    self.send_header("Transfer-Encoding", "chunked")
+    self.end_headers()
+    with t.cond:
+        t.readers += 1
+    try:
+        while True:
+            if pos < t.base:
+                pos = t.base                            # 一時停止が長くて消された → 残っている最初から（188 の倍数）
+            chunk = t.read(pos, CHUNK) if pos < t.size else b""
+            if not chunk:
+                if t.stopped:
+                    break
+                t.wait_for(pos, 15)
+                t.touch()
+                continue
+            self.wfile.write(b"%X\r\n" % len(chunk) + chunk + b"\r\n")
+            pos += len(chunk)
+            t.touch()
+        self.wfile.write(b"0\r\n\r\n")
+    except OSError:
+        pass
+    finally:
+        with t.cond:
+            t.readers -= 1
+
+
+Handler._timeshift = lambda self, parts, head: _timeshift(self, parts, head)
+
+
 def main():
+    # 前回落ちたときの追っかけバッファが残っていれば消す（局ごとに数 GB になる）
+    if os.path.isdir(TS_DIR):
+        for name in os.listdir(TS_DIR):
+            if re.fullmatch(r"\d+(-\d+)?", name):      # 自分が作ったフォルダ（局-番号）だけ
+                shutil.rmtree(os.path.join(TS_DIR, name), ignore_errors=True)
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     srv.daemon_threads = True
     log(f"listening on {HOST}:{PORT}  mirakurun={MIRAKURUN}")

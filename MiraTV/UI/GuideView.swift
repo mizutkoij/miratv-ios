@@ -16,6 +16,19 @@ struct GuideView: View {
     @State private var band = "GR"
     @State private var dayOffset = 0
     @State private var columns: [ESSchedule] = []
+    /// 並び順: "remote" = リモコン番号順（既定）、"affiliation" = 系列順（関東の並び: NHK → 独立 → 日テレ → テレ朝 → TBS → テレ東 → フジ）
+    @AppStorage("guideOrder") private var guideOrder = "remote"
+
+    /// 画面に出す順。系列順は地上波だけ（BS・CS はリモコン番号順のまま）
+    private var displayColumns: [ESSchedule] {
+        guard guideOrder == "affiliation", band == "GR" else { return columns }
+        return columns.enumerated().sorted { a, b in
+            let ra = JikkyoChannel.affiliationRank(name: a.element.channel.name) ?? 99
+            let rb = JikkyoChannel.affiliationRank(name: b.element.channel.name) ?? 99
+            if ra != rb { return ra < rb }
+            return a.offset < b.offset            // 同じ系列の中は、もとの順（リモコン番号順）
+        }.map(\.element)
+    }
     @State private var cache: [String: [ESSchedule]] = [:]
     @State private var loading = false
     @State private var errorText: String?
@@ -69,6 +82,10 @@ struct GuideView: View {
                         Picker("放送波", selection: $band) {
                             ForEach(Self.bands, id: \.self) { Text(bandLabel($0)).tag($0) }
                         }
+                        Picker("並び順", selection: $guideOrder) {
+                            Text("リモコン番号順").tag("remote")
+                            Text("系列順（NHK・独立・日テレ・朝日・TBS・テレ東・フジ）").tag("affiliation")
+                        }
                     } label: {
                         HStack(spacing: 4) {
                             Text(bandLabel(band)).font(Theme.F.jp(14, .bold))
@@ -118,7 +135,7 @@ struct GuideView: View {
                         ZStack(alignment: .topLeading) {
                             HStack(alignment: .top, spacing: 0) {
                                 timeColumn
-                                ForEach(columns, id: \.channel.id) { s in column(s) }
+                                ForEach(displayColumns, id: \.channel.id) { s in column(s) }
                             }
                             .frame(height: totalHeight)
                             nowLine
@@ -138,7 +155,7 @@ struct GuideView: View {
     private var headerRow: some View {
         HStack(spacing: 0) {
             Color.clear.frame(width: Theme.guideTimeColumnWidth, height: 44)
-            ForEach(columns, id: \.channel.id) { s in
+            ForEach(displayColumns, id: \.channel.id) { s in
                 HStack(spacing: 6) {
                     LogoTile(url: Servers.epgstation?.logoURL(channelId: s.channel.id), size: Theme.Logo.guide)
                     VStack(alignment: .leading, spacing: 0) {

@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import Combine
 import UIKit
+import CoreImage
 
 /// TSPipeline が吐く CMSampleBuffer を AVSampleBuffer 系レンダラに流し、
 /// AVSampleBufferRenderSynchronizer で音声基準の A/V 同期をとる。
@@ -32,6 +33,10 @@ final class PlayerEngine: ObservableObject {
     private var startTime: Double = 0
     private var seekTarget: Double?
     private var positionTimer: Timer?
+    /// ファイルでない再生（追っかけ再生）でも、再生を始めてからの秒を position に出す。play() の前に設定する
+    var tracksStreamPosition = false
+    /// 時計を始めた時刻（PTS 秒）。tracksStreamPosition のとき position = 時計 - これ（clockLock で保護）
+    private var clockOrigin: Double = 0
     private var pausedFlag = false          // clockLock で保護（パイプラインスレッドからも読む）
     private var speedValue: Double = 1.0    // clockLock で保護
     private var seekPendingFlag = false     // clockLock で保護
@@ -109,7 +114,7 @@ final class PlayerEngine: ObservableObject {
         clockLock.unlock()
         state = .connecting
         positionTimer?.invalidate(); positionTimer = nil
-        if file {
+        if file || tracksStreamPosition {
             positionTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.pumpPosition() }
         }
         captionLock.lock(); captionQueue.removeAll(); captionLock.unlock()
@@ -179,6 +184,7 @@ final class PlayerEngine: ObservableObject {
     }
 
     func stop() {
+        frameLock.lock(); lastFrame = nil; frameLock.unlock()     // 選局直後に前の局の 1 枚を保存しないように
         // 世代を進めて、throttle() で待っている読み込みスレッドを確実に抜けさせる
         genLock.lock(); generation += 1; genLock.unlock()
         captionTimer?.invalidate(); captionTimer = nil
@@ -257,9 +263,28 @@ final class PlayerEngine: ObservableObject {
         }
     }
 
+    // MARK: キャプチャ（最後に描画へ回した 1 枚を覚えておく）
+    private let frameLock = NSLock()
+    private var lastFrame: CVPixelBuffer?
+
+    /// いま映っている 1 枚（表示の縦横比 = DAR に直したもの）。字幕・実況コメントは入らない
+    func captureImage() -> UIImage? {
+        frameLock.lock(); let pb = lastFrame; frameLock.unlock()
+        guard let pb else { return nil }
+        let ci = CIImage(cvPixelBuffer: pb)
+        let w = ci.extent.width, h = ci.extent.height
+        let targetW = (h * CGFloat(info.displayAspect)).rounded()
+        let scaled = w > 0 && abs(targetW - w) > 2 ? ci.transformed(by: CGAffineTransform(scaleX: targetW / w, y: 1)) : ci
+        guard let cg = CIContext(options: nil).createCGImage(scaled, from: scaled.extent) else { return nil }
+        return UIImage(cgImage: cg)
+    }
+
     private func enqueueVideo(_ sb: CMSampleBuffer) {
         if videoRenderer.status == .failed {
             videoRenderer.flush()
+        }
+        if let pb = CMSampleBufferGetImageBuffer(sb) {
+            frameLock.lock(); lastFrame = pb; frameLock.unlock()
         }
         videoRenderer.enqueue(sb)
         clockLock.lock()
@@ -299,6 +324,7 @@ final class PlayerEngine: ObservableObject {
     private func startClock(at time: CMTime) {
         clockLock.lock()
         let rate: Float = pausedFlag ? 0 : Float(speedValue)
+        clockOrigin = time.seconds
         clockLock.unlock()
         synchronizer.setRate(rate, time: time)
         DispatchQueue.main.async { [weak self] in
@@ -370,10 +396,14 @@ final class PlayerEngine: ObservableObject {
 
     private func pumpPosition() {
         if let t = seekTarget { position = t; return }
-        clockLock.lock(); let started = clockStarted; clockLock.unlock()
+        clockLock.lock(); let started = clockStarted; let origin = clockOrigin; clockLock.unlock()
         guard started else { return }
         let now = synchronizer.currentTime().seconds
         guard now.isFinite else { return }
+        if !isFile {
+            position = max(now - origin, 0)        // 追っかけ再生: このストリームを出し始めてからの秒
+            return
+        }
         let upper = effectiveDuration > 0 ? effectiveDuration : Double.greatestFiniteMagnitude
         position = min(max(now - startTime, 0), upper)
     }

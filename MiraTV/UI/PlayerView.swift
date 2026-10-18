@@ -17,6 +17,24 @@ struct PlayerView: View {
     @EnvironmentObject private var epg: EPGStore
     @EnvironmentObject private var radio: RadioPlayer
     @EnvironmentObject private var session: PlaybackSession
+    @StateObject private var comments = CommentController()
+    @AppStorage("showComments") private var commentsOn = false
+    @State private var nowPlaying = TVNowPlaying()
+    @State private var toast: String?
+    /// ロック画面の「停止」で止めたライブ（もう一度押すと選局し直す）
+    @State private var livePaused = false
+
+    // MARK: 追っかけ再生（streamd が直近の放送をディスクに貯めている）
+    @AppStorage("timeshiftEnabled") private var timeshiftEnabled = true
+    @State private var tsInfo: TimeshiftInfo?
+    @State private var tsInfoAt = Date()
+    /// いま追っかけ再生中か（false = 普通のライブ）
+    @State private var tsActive = false
+    /// 追っかけで流し始めた位置（バッファ開始からの秒）。いまの位置 = これ + engine.position
+    @State private var tsBase: Double = 0
+    @State private var tsPausedAt: Date?
+    @State private var tsScrub: Double?
+    @State private var tsRetried = false
     @AppStorage("autoLowDataOnCellular") private var autoLowData = false
     /// 変換配信（EPGStation の ffmpeg）を使うか。既定はオフ＝サーバーに変換の負荷をかけない
     @AppStorage("allowServerTranscode") private var allowTranscode = false
@@ -84,6 +102,61 @@ struct PlayerView: View {
     }
 
     /// 字幕は映像と同じ範囲に透明な WebView を重ねて描く（操作は通さない）
+    /// この局の実況 ID（ニコニコ実況）。分からない局は nil
+    private var jkID: String? { JikkyoChannel.id(name: current.name, serviceId: current.serviceId, type: current.channel?.type) }
+
+    @ViewBuilder private var commentLayer: some View {
+        if commentsOn && !isAudioOnly {
+            CommentOverlay(controller: comments)
+                .aspectRatio(isHLS ? 16.0 / 9.0 : engine.info.displayAspect, contentMode: .fit)
+                .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder private var toastLayer: some View {
+        if let toast {
+            Text(toast).font(Theme.F.jp(13, .bold)).foregroundStyle(Theme.C.text)
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(Color.black.opacity(0.75), in: Capsule())
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.bottom, 12)
+                .transition(.opacity)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func showToast(_ s: String) {
+        withAnimation { toast = s }
+        let shown = s
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { if toast == shown { withAnimation { toast = nil } } }
+    }
+
+    private func capture() {
+        guard let img = engine.captureImage() else { showToast("まだ映像がありません"); return }
+        Task { showToast(await CaptureSaver.save(img)) }
+    }
+
+    /// ロック画面の再生 / 停止。ライブは一時停止できないので、止める → もう一度押すと選局し直す
+    private func toggleLivePlayback() {
+        if livePaused {
+            livePaused = false
+            startPlayback()
+        } else {
+            livePaused = true
+            engine.stop()
+            hls.stop()
+            comments.clear?()
+        }
+        updateNowPlaying()
+    }
+
+    private func updateNowPlaying() {
+        nowPlaying.update(title: program?.title ?? "", channel: current.name, artworkURL: client.logoURL(for: current),
+                          isLive: !tsActive, rate: (livePaused || (tsActive && engine.isPaused)) ? 0 : 1,
+                          programStart: program?.start, programEnd: program?.end,
+                          behind: tsActive ? max(liveEdge - tsPosition, 0) : nil)
+    }
+
     @ViewBuilder private var captionLayer: some View {
         if !isHLS {
             CaptionOverlay(controller: captions)
@@ -123,12 +196,52 @@ struct PlayerView: View {
         .onAppear {
             radio.stop()   // テレビとラジオは同時に鳴らさない
             allServices = client.cachedServices() ?? services
+            nowPlaying.activate(
+                onPlay: {
+                    if tsActive { if engine.isPaused { tsTogglePause() } } else if livePaused { toggleLivePlayback() }
+                },
+                onPause: {
+                    // 追っかけが使えるなら、止めた位置から後で続きを見られるように一時停止する
+                    if tsAvailable && tsInfo != nil { if !(tsActive && engine.isPaused) { tsTogglePause() } }
+                    else if !livePaused { toggleLivePlayback() }
+                },
+                onSkip: nil)
+            updateNowPlaying()
             engine.captionHandler = { packets in
                 if captionsOn { captions.feed(packets) }
             }
             startPlayback()
         }
+        .task(id: "\(current.id)-\(tsAvailable)") {
+            // 見ている間は 5 秒おきに start を呼ぶ（貯め続ける合図。止めると 3 分で streamd が止まる）
+            tsInfo = nil                       // 前の局のバッファの範囲を出さない
+            guard tsAvailable else { return }
+            let svc = current
+            while !Task.isCancelled {
+                if let info = await TimeshiftClient.start(svc), !Task.isCancelled {
+                    tsInfo = info.stopped == true ? nil : info
+                    tsInfoAt = Date()
+                } else if Date().timeIntervalSince(tsInfoAt) > 15 {
+                    tsInfo = nil               // streamd に届かない間は、追っかけの操作を出さない
+                }
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+            TimeshiftClient.stop(svc)          // 局を替えた・閉じた・追っかけを使わなくなった
+        }
+        .task(id: "\(current.id)-\(commentsOn)-\(livePaused)") {
+            if commentsOn && !livePaused { comments.startLive(jkID: jkID) } else { comments.stopAll() }
+        }
+        .onChange(of: tsInfo?.id) { old, new in
+            // バッファが作り直された（長く止めていた・チューナーを録画に譲った等）→ 前の位置はもう無いのでライブへ
+            guard tsActive, let old, let new, new != old else { return }
+            showToast("追っかけ用の録画が途切れたので、ライブに戻しました")
+            goLive()
+        }
+        .onChange(of: program?.id) { _, _ in updateNowPlaying() }
+        .onChange(of: current.id) { _, _ in livePaused = false; updateNowPlaying() }
         .onDisappear {
+            comments.stopAll()
+            nowPlaying.deactivate()
             engine.stop()
             hls.stop()
             setOrientation(.all)
@@ -173,6 +286,9 @@ struct PlayerView: View {
 
     private func startPlayback() {
         engine.audioMode = .both
+        tsActive = false
+        tsPausedAt = nil
+        engine.tracksStreamPosition = false
         usingRelay = false
         usingOneSeg = false
         let es = Servers.epgstation
@@ -214,7 +330,17 @@ struct PlayerView: View {
 
     /// 中継で開けなかった（streamd が止まっている等）→ 以後この画面では Mirakurun から直接
     private func handleEngineState(_ s: PlayerEngine.State) {
+        if case .playing = s { tsRetried = false }
         guard case .failed(let msg) = s else { return }
+        if tsActive {
+            // 追っかけ中に切れた（長い一時停止でサーバーが接続を閉じた等）→ 1 回だけ、その位置で開き直す。駄目ならライブへ
+            DebugLog.log("player", "追っかけ再生が切れました: \(msg)")
+            if !tsRetried, tsInfo != nil { tsRetried = true; openTimeshift(at: tsPosition) } else {
+                showToast("追っかけ再生を続けられないので、ライブに戻しました")
+                goLive()
+            }
+            return
+        }
         if usingOneSeg {
             // ワンセグが開けなかった → この画面では本放送から（音声のみなら端末で映像を捨てる）
             DebugLog.log("player", "ワンセグで開けず、本放送で再生: \(msg)")
@@ -348,6 +474,114 @@ struct PlayerView: View {
         }
     }
 
+    // MARK: - 追っかけ再生
+
+    /// 追っかけを使えるか（設定がオン・streamd がある・原画質で見ている）
+    private var tsAvailable: Bool { timeshiftEnabled && modeID == -1 && Servers.streamd != nil }
+
+    /// ライブの端（バッファ開始からの秒）。info は 5 秒おきなので、その間は経過時間で進める
+    private var liveEdge: Double {
+        guard let info = tsInfo else { return 0 }
+        return info.seconds + (info.stopped == true ? 0 : Date().timeIntervalSince(tsInfoAt))
+    }
+
+    private var tsPosition: Double { tsActive ? tsBase + engine.position : liveEdge }
+
+    private func clampTS(_ t: Double) -> Double {
+        min(max(t, tsInfo?.availableFrom ?? 0), max(liveEdge - 3, 0))
+    }
+
+    @discardableResult
+    private func openTimeshift(at t: Double, paused: Bool = false) -> Bool {
+        let target = clampTS(t)
+        guard let info = tsInfo, let url = Servers.timeshiftURL(current, "play", from: target, bufferID: info.id) else { return false }
+        livePaused = false
+        DebugLog.log("player", "追っかけ再生 \(Int(target))s（ライブの \(Int(liveEdge - target))s 前）")
+        tsActive = true
+        tsBase = target
+        tsPausedAt = paused ? Date() : nil
+        hls.stop()
+        dataMode = false
+        engine.audioOnly = false
+        engine.tracksStreamPosition = true
+        engine.play(url: url)
+        if paused { engine.setPaused(true) }
+        updateNowPlaying()
+        return true
+    }
+
+    private func goLive() {
+        startPlayback()          // 追っかけをやめて、Mirakurun から直接のライブに戻す
+        updateNowPlaying()
+    }
+
+    /// 一時停止 / 再開。ライブ中に押したら、その場で止めて追っかけに入る
+    private func tsTogglePause() {
+        guard tsActive else { openTimeshift(at: liveEdge - 2, paused: true); return }
+        if engine.isPaused {
+            // 20 秒以上止めていたら、サーバーが接続を閉じているので、その位置で開き直す
+            if let at = tsPausedAt, Date().timeIntervalSince(at) > 20 { openTimeshift(at: tsPosition) } else { engine.setPaused(false) }
+            tsPausedAt = nil
+        } else {
+            engine.setPaused(true)
+            tsPausedAt = Date()
+        }
+        updateNowPlaying()
+    }
+
+    private func tsSkip(_ d: Double) {
+        let target = tsPosition + d
+        if target >= liveEdge - 3 { if tsActive { goLive() }; return }
+        openTimeshift(at: target)
+    }
+
+    private func tsClock(_ s: Double) -> String {
+        let t = Int(max(s, 0))
+        return t >= 3600 ? String(format: "%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60) : String(format: "%d:%02d", t / 60, t % 60)
+    }
+
+    /// 映像の下（横画面では下のバーの上）に出す: ⏪15・一時停止・シークバー（貯まっている範囲）・LIVE
+    @ViewBuilder private var timeshiftBar: some View {
+        if tsAvailable, let info = tsInfo, info.seconds > 5 {
+            TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+                let edge = liveEdge
+                let lower = info.availableFrom
+                let pos = min(tsPosition, edge)
+                let behind = edge - pos
+                HStack(spacing: 8) {
+                    Button { tsSkip(-15) } label: {
+                        Image(systemName: "gobackward.15").font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(Theme.C.text).frame(width: 40, height: 40)
+                    }
+                    .buttonStyle(.plain).accessibilityLabel("15 秒戻る")
+                    Button { tsTogglePause() } label: {
+                        Image(systemName: tsActive && engine.isPaused ? "play.fill" : "pause.fill")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(Theme.C.text).frame(width: 40, height: 40)
+                    }
+                    .buttonStyle(.plain).accessibilityLabel(tsActive && engine.isPaused ? "再生" : "一時停止")
+                    Slider(value: Binding(get: { tsScrub ?? pos }, set: { tsScrub = $0 }),
+                           in: lower...max(edge, lower + 1)) { editing in
+                        guard !editing, let v = tsScrub else { return }
+                        tsScrub = nil
+                        if v >= edge - 3 { if tsActive { goLive() } } else { openTimeshift(at: v) }
+                    }
+                    .tint(tsActive ? Theme.C.accent : Theme.C.live)
+                    Button { if tsActive { goLive() } } label: {
+                        Text(tsActive ? "-\(tsClock(behind))" : "LIVE")
+                            .font(Theme.F.mono(11, .semibold))
+                            .foregroundStyle(tsActive ? Theme.C.text : Theme.C.onAccent)
+                            .padding(.horizontal, 8).frame(height: 26)
+                            .background(tsActive ? Theme.C.surface : Theme.C.live, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(tsActive ? "ライブに戻る" : "ライブ")
+                }
+                .padding(.horizontal, 12)
+            }
+        }
+    }
+
     // MARK: - ミニプレイヤー（たたんだとき）
 
     private var isMutedNow: Bool { isHLS ? hls.isMuted : engine.isMuted }
@@ -388,9 +622,12 @@ struct PlayerView: View {
                 Theme.C.video
                 if !boxed { videoSurface }
                 captionLayer
+                commentLayer
                 bmlOverlay
                 boxedVideo
                 statusOverlay
+                pausedOverlay
+                toastLayer
                 CircleButton(systemName: "chevron.down", size: 36, fill: Color.black.opacity(0.55),
                              foreground: Theme.C.text) { session.minimize() }
                     .padding(12)
@@ -403,7 +640,12 @@ struct PlayerView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
+                        timeshiftBar.padding(.top, 6)
                         controlRow
+                        if commentsOn, !comments.status.isEmpty {
+                            Text(comments.status).font(Theme.F.caption).foregroundStyle(Theme.C.text4)
+                                .padding(.horizontal, 16).padding(.bottom, 8)
+                        }
                         Divider().overlay(Theme.C.divider)
                         programInfo
                         otherChannels
@@ -420,6 +662,8 @@ struct PlayerView: View {
             ControlTile(icon: "speaker.wave.2", label: audioLabel, enabled: audioSelectable,
                         active: audioSelectable && engine.audioMode != .both) { cycleAudio() }
             ControlTile(icon: "d.circle", label: "データ", enabled: dataAvailable, active: dataMode) { dataMode.toggle() }
+            ControlTile(icon: "text.bubble", label: "実況", enabled: jkID != nil, active: commentsOn) { commentsOn.toggle() }
+            ControlTile(icon: "camera", label: "写真", enabled: !isHLS && !isAudioOnly) { capture() }
             PiPTile(pip: engine.pip, supported: !isHLS && !isAudioOnly)
             ControlTile(icon: "arrow.up.left.and.arrow.down.right", label: "全画面") { setOrientation(.landscape) }
         }
@@ -567,15 +811,19 @@ struct PlayerView: View {
         ZStack {
             if !boxed { videoSurface.ignoresSafeArea() }
             captionLayer
+            commentLayer
             bmlOverlay
             boxedVideo
             statusOverlay
+            pausedOverlay
+            toastLayer
             Color.clear.contentShape(Rectangle())
                 .onTapGesture { withAnimation(.easeOut(duration: 0.2)) { showPanel.toggle() } }
             if showPanel {
                 VStack(spacing: 0) {
                     landscapeTopBar
                     Spacer()
+                    timeshiftBar.padding(.vertical, 4).background(Theme.C.overlayBar)
                     landscapeBottomBar
                 }
                 HStack {
@@ -601,6 +849,8 @@ struct PlayerView: View {
             CapsuleTile(label: audioLabel, enabled: audioSelectable,
                         active: audioSelectable && engine.audioMode != .both) { cycleAudio() }
             CapsuleTile(label: "d", enabled: dataAvailable, active: dataMode) { dataMode.toggle() }
+            CapsuleTile(label: "実況", enabled: jkID != nil, active: commentsOn) { commentsOn.toggle() }
+            CapsuleTile(label: "写真", enabled: !isHLS && !isAudioOnly) { capture() }
             PiPCapsule(pip: engine.pip, supported: !isHLS && !isAudioOnly)
         }
         .padding(.horizontal, 16).padding(.vertical, 8)
@@ -646,6 +896,19 @@ struct PlayerView: View {
     }
 
     // MARK: - 状態表示
+
+    @ViewBuilder private var pausedOverlay: some View {
+        if livePaused {
+            Button { toggleLivePlayback() } label: {
+                Label("停止中 · タップで再生", systemImage: "play.fill")
+                    .font(Theme.F.jp(14, .bold)).foregroundStyle(Theme.C.onAccent)
+                    .padding(.horizontal, 16).frame(height: 44)
+                    .background(Theme.C.accent, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
 
     @ViewBuilder private var statusOverlay: some View {
         if isHLS {

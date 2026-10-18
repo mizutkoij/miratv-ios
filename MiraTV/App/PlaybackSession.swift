@@ -22,6 +22,9 @@ final class PlaybackSession: ObservableObject {
     }
 
     @Published private(set) var item: Item?
+    /// 「字幕で探す」から開いたとき、その位置へ飛ぶ（録画の再生画面が受け取って消す）
+    struct SeekRequest: Equatable { let recordedId: Int; let time: Double; let nonce = UUID() }
+    @Published var seekRequest: SeekRequest?
     @Published private(set) var minimized = false
     /// ライブで「いま見ている局」。再生画面の中で選局しても item（= 画面の id）は変えずに、ここだけ更新する
     private(set) var liveServiceID: Int?
@@ -39,7 +42,8 @@ final class PlaybackSession: ObservableObject {
         if case .live = item { liveServiceID = service.id }
     }
 
-    func playRecorded(_ recorded: ESRecorded, es: EPGStationClient) {
+    func playRecorded(_ recorded: ESRecorded, es: EPGStationClient, at time: Double? = nil) {
+        seekRequest = time.map { SeekRequest(recordedId: recorded.id, time: max($0, 0)) }
         if case .recorded(let r, _) = item, r.id == recorded.id { expand(); return }
         item = .recorded(recorded, es)
         minimized = false

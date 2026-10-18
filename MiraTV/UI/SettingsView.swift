@@ -14,6 +14,8 @@ struct SettingsView: View {
     /// EPGStation に変換（ffmpeg のエンコード）をさせる再生モードを使うか。サーバーの CPU を大きく使うので既定はオフ
     @AppStorage("allowServerTranscode") private var allowTranscode = false
     @AppStorage("cmDetection") private var cmDetection = true
+    @AppStorage("timeshiftEnabled") private var timeshiftEnabled = true
+    @AppStorage("liveActivity") private var liveActivity = true
 
     @EnvironmentObject private var epg: EPGStore
 
@@ -60,6 +62,25 @@ struct SettingsView: View {
                             .tint(Theme.C.accent)
                             .font(Theme.F.jp(14)).foregroundStyle(Theme.C.text)
                         Text("録画を開くと homeserver が音声だけを読んで無音の位置を調べます（エンコードはしません。1 時間の番組で約 1 分、1 回だけ）。")
+                            .font(Theme.F.caption).foregroundStyle(Theme.C.text4)
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("追っかけ再生（ライブを戻して見る）", isOn: $timeshiftEnabled)
+                            .tint(Theme.C.accent)
+                            .font(Theme.F.jp(14)).foregroundStyle(Theme.C.text)
+                        Text("原画質で見ている間、streamd が直近の放送（既定 30 分）を homeserver のディスクに貯めます。エンコードはしないので CPU はほぼ使いません。チューナーは見ている局の 1 つだけ。閉じて 3 分たつと止まって消えます。")
+                            .font(Theme.F.caption).foregroundStyle(Theme.C.text4)
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("ロック画面・Dynamic Island に表示", isOn: $liveActivity)
+                            .tint(Theme.C.accent)
+                            .onChange(of: liveActivity) { _, on in
+                                if on { LiveActivityController.shared.allowRestart() } else { LiveActivityController.shared.disable() }
+                            }
+                            .font(Theme.F.jp(14)).foregroundStyle(Theme.C.text)
+                        Text("再生中の局・番組と進み具合を出します（ライブアクティビティ）。出ないときは iPhone の 設定 › MiraTV › ライブアクティビティ を確認。署名のときにアプリ拡張を外すと出ません。")
                             .font(Theme.F.caption).foregroundStyle(Theme.C.text4)
                     }
 

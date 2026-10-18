@@ -15,6 +15,41 @@ struct ChapterInfo: Decodable {
     }
 }
 
+/// 録画の字幕を文字にしたもの（server/chapterd.py の /captions）
+struct CaptionLine: Decodable, Hashable, Identifiable {
+    let time: Double
+    let text: String
+    var id: String { "\(time)-\(text)" }
+
+    init(from decoder: Decoder) throws {        // [秒, "文字"]
+        var c = try decoder.unkeyedContainer()
+        time = try c.decode(Double.self)
+        text = try c.decode(String.self)
+    }
+}
+
+struct CaptionTextInfo: Decodable {
+    let status: String            // pending / running / ready / error
+    let progress: Double?
+    let captions: [CaptionLine]?
+    let error: String?
+}
+
+struct CaptionSearchResult: Decodable {
+    let indexed: Int
+    let results: [Hit]
+
+    struct Hit: Decodable, Identifiable {
+        /// videoFileId
+        let id: Int
+        /// 録画 ID（EPGStation の recordedId）。古いサーバーでは無い
+        let rid: Int?
+        let name: String?
+        let hits: [CaptionLine]
+        let count: Int?
+    }
+}
+
 struct ChapterClient {
     let baseURL: URL
 
@@ -38,6 +73,28 @@ struct ChapterClient {
         req.timeoutInterval = 4
         guard let (_, res) = try? await URLSession.shared.data(for: req), let http = res as? HTTPURLResponse else { return false }
         return http.statusCode == 200 && http.value(forHTTPHeaderField: "Accept-Ranges") == "bytes"
+    }
+
+    /// 字幕を文字で取り出す（初回は homeserver がファイルを 1 回読む。1 時間の番組で数十秒〜数分）。ポーリングする
+    func captions(videoFileId: Int, filename: String, recordedId: Int) async throws -> CaptionTextInfo {
+        var c = URLComponents(url: baseURL.appending(path: "captions/\(videoFileId)"), resolvingAgainstBaseURL: false)!
+        c.queryItems = [URLQueryItem(name: "name", value: filename), URLQueryItem(name: "rid", value: String(recordedId))]
+        var req = URLRequest(url: c.url!)
+        req.timeoutInterval = 20
+        let (data, res) = try await URLSession.shared.data(for: req)
+        if let http = res as? HTTPURLResponse, !(200..<300).contains(http.statusCode) { throw URLError(.badServerResponse) }
+        return try JSONDecoder().decode(CaptionTextInfo.self, from: data)
+    }
+
+    /// 取り出し済みの録画すべてから探す（スペース区切りで AND。ひらがな・カタカナ、全角・半角は区別しない）
+    func searchCaptions(_ q: String) async throws -> CaptionSearchResult {
+        var c = URLComponents(url: baseURL.appending(path: "captions/search"), resolvingAgainstBaseURL: false)!
+        c.queryItems = [URLQueryItem(name: "q", value: q)]
+        var req = URLRequest(url: c.url!)
+        req.timeoutInterval = 20
+        let (data, res) = try await URLSession.shared.data(for: req)
+        if let http = res as? HTTPURLResponse, !(200..<300).contains(http.statusCode) { throw URLError(.badServerResponse) }
+        return try JSONDecoder().decode(CaptionSearchResult.self, from: data)
     }
 
     func chapters(videoFileId: Int, filename: String) async throws -> ChapterInfo {

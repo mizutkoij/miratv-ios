@@ -8,6 +8,9 @@ ExecStart=/usr/bin/python3 /home/homeserver/miratv-chapterd/streamd.py
 Environment=HOST=192.0.2.10
 Environment=PORT=23236
 Environment=MIRAKURUN=http://127.0.0.1:40772
+# 追っかけ再生: 直近の放送を貯める場所と長さ（30 分で約 4GB。見ている局だけ・閉じて 3 分で消える）
+Environment=TIMESHIFT_DIR=/home/homeserver/miratv-timeshift
+Environment=TIMESHIFT_MINUTES=30
 # 再生中は止まると音が切れるので idle にはしない。録画（recpt1/Mirakurun）よりは控えめに
 Nice=5
 MemoryMax=128M

@@ -20,7 +20,21 @@ iPhone ──▶ streamd :23236 ──▶ Mirakurun /api/services/{id}/stream?de
 - PCR が映像の PID に乗っていたら PCR なし（0x1FFF）と書き換え、PCR 専用 PID（地デジに多い）なら残す
 - PMT が 2 パケットにまたがる場合は書き換えずに通す（ISDB ではまず無い）
 
-## 何がどれだけ流れているかを測る
+## 追っかけ再生（/timeshift）
+```
+GET /timeshift/{id}/start        貯め始める（貯めていればそのまま）。状態を返す。アプリは見ている間 5 秒おきに呼ぶ
+GET /timeshift/{id}/info         状態だけ {"bytes", "seconds", "available_from", "stopped"}
+GET /timeshift/{id}/play?from=S  バッファ開始から S 秒の位置から流す。貯まっている端に追いついたら、そのまま新しい分を待って流し続ける
+GET /timeshift/{id}/stop         この端末はもう見ない（ほかに見ている端末も再生中の play も無ければ止めて消す）
+```
+- どれも `client=<端末 ID>` を付ける。`play` には `id=<バッファ番号>`（start が返す）も付け、作り直されていたら 404
+- Mirakurun から原画質の TS を受けて `TIMESHIFT_DIR` に 32MB ごとのファイルで書くだけ（エンコードしない。CPU はほぼ使わない、ディスクの書き込みは約 2MB/s）
+- `TIMESHIFT_MINUTES`（既定 30）より古いファイルは消す。30 分で約 3.5〜4GB
+- `start` が `TIMESHIFT_IDLE` 秒（既定 180）来なくて、`play` も開いていなければ止めて消す
+- Mirakurun には優先度 0 で頼むので、録画が始まってチューナーが足りなくなれば、こちらが先に切られる
+- 一時停止して 30 秒以上読まないと、サーバーが接続を閉じる（アプリはその位置で開き直す）
+
+
 ```sh
 curl 'http://<tailscale-ip>:23236/probe/<serviceId>?seconds=10'
 # {"in_mbps": {"video": 13.1, "audio": 0.25, "caption": 0.01, "data": 0.9, "si": 0.1}, ...}
@@ -42,6 +56,7 @@ curl http://<tailscale-ip>:23236/health
 ## アプリ側
 - 再生モード「音声のみ」: streamd があれば `/live/{id}?video=0` を開く。開けなければ、その画面では Mirakurun の原画質から端末で映像を捨てる方式に戻る
 - TSPipeline: 音声のみのときは映像ストリームが無くても開ける
+- 追っかけ再生: 原画質で見ている間、映像の下に「⏪15・一時停止・シークバー・LIVE」が出る。戻す・止めると `/timeshift/{id}/play?from=` に切り替え、LIVE で Mirakurun 直に戻る
 
 ## この先（エンコードせずにできること／できないこと）
 - できる: 音声のみ、データ放送の除去、副チャンネル・EIT などの除去、複数台で同じ局を見るときの上流 1 本化
