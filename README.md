@@ -102,6 +102,19 @@ radio-web (:8090, Tailscale 内)
 - NHK のアーカイブ: `archive/search?station=nhk:R1` 経由の画面
 - radio-web 側の録音・予約 API（`/api/record/*`, `/api/reserve*`）
 
+## Usenet のアーカイブ（nzb-dl 連携）
+
+録画タブの「アーカイブ」で、Usenet に上げた録画を探してストリーム再生します（ci50、詳細は `docs/changes-usenet-archive.md` と `docs/nzb-stream-playback.md`）。
+
+```
+nzb-dl (VPS1 :8083, Tailscale 内, API キー)
+  ├─ GET /api/items?category=tv&status=on   一覧 → 端末に保存して端末で検索（差分だけ取り足す）
+  ├─ GET /api/items/lookup?folder=          本体の拡張子（ts / mp4 / 7z）
+  └─ GET /api/stream/<id>                   本体（Range）→ TS は TSPipeline、mp4 は AVPlayer
+```
+
+設定 ›「nzb-dl（Usenet のアーカイブ）」に URL と API キーを入れます（キーはリポジトリに置かない）。
+
 ## 次のステップ
 
 - **Step 2: 字幕** — `AVMEDIA_TYPE_SUBTITLE`（codec `arib_caption`）の discard を外し、パケットを libaribcaption に渡して描画したビットマップを PTS 同期で重ねる

@@ -13,6 +13,8 @@ enum Defaults {
     static let webbmlURL = "http://192.0.2.10:23234"
     /// 自前の中継（server/streamd.py）。映像を抜いた音声だけの TS などを、エンコードせずに返す
     static let streamdURL = "http://192.0.2.10:23236"
+    /// VPS1 の nzb-dl（Usenet のアーカイブ、:8083、Tailscale のみ）。アドレスと API キーは設定画面で入れる（リポジトリには置かない）
+    static let nzbdlURL = ""
 }
 
 extension Date {

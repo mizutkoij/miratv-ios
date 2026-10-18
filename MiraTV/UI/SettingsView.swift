@@ -8,6 +8,9 @@ struct SettingsView: View {
     @AppStorage("webbmlURL") private var webbmlURL = Defaults.webbmlURL
     @AppStorage("chapterURL") private var chapterURL = Defaults.chapterURL
     @AppStorage("streamdURL") private var streamdURL = Defaults.streamdURL
+    @AppStorage("nzbdlURL") private var nzbdlURL = Defaults.nzbdlURL
+    /// nzb-dl の API キー。リポジトリには置かず、ここで入れる
+    @AppStorage("nzbdlKey") private var nzbdlKey = ""
     @AppStorage("autoSkipCM") private var autoSkipCM = false
     @AppStorage("showInactiveChannels") private var showInactive = false
     @AppStorage("debugLog") private var debugLog = true
@@ -40,6 +43,18 @@ struct SettingsView: View {
                           hint: "homeserver の server/streamd.py。エンコードせず、要らない TS パケットを捨てるだけ。音声のみが約 0.3Mbps になります。空なら使いません。")
                     field("CM 検出（録画のチャプター）", $chapterURL, Defaults.chapterURL, key: "chapter",
                           hint: "録画を開くと、homeserver が音声の無音位置から CM の区間を推定します（初回は 1 時間の番組で約 1 分）。")
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        field("nzb-dl（Usenet のアーカイブ）", $nzbdlURL, "http://100.x.x.x:8083", key: "nzbdl",
+                              hint: "VPS1 の nzb-dl。録画タブの「アーカイブ」で、Usenet に上げた録画を探してストリーム再生します。Tailscale のアドレスを入れてください。", showResult: false)
+                        SecureField("API キー", text: $nzbdlKey)
+                            .font(Theme.F.jp(14)).foregroundStyle(Theme.C.text)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .padding(.horizontal, 12).frame(height: 44)
+                            .background(Theme.C.surface, in: RoundedRectangle(cornerRadius: Theme.R.button))
+                            .overlay(RoundedRectangle(cornerRadius: Theme.R.button).stroke(Theme.C.border))
+                        if let r = results["nzbdl"] { StatusLine(text: r.text, color: r.ok ? Theme.C.live : Theme.C.rec) }
+                    }
 
                     Button { Task { await runTests() } } label: {
                         Text(testing ? "確認中…" : "接続テスト")
@@ -124,7 +139,7 @@ struct SettingsView: View {
     }
 
     private func field(_ title: String, _ text: Binding<String>, _ placeholder: String, key: String,
-                       hint: String? = nil) -> some View {
+                       hint: String? = nil, showResult: Bool = true) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title).font(Theme.F.section).foregroundStyle(Theme.C.text)
             TextField(placeholder, text: text)
@@ -134,7 +149,7 @@ struct SettingsView: View {
                 .background(Theme.C.surface, in: RoundedRectangle(cornerRadius: Theme.R.button))
                 .overlay(RoundedRectangle(cornerRadius: Theme.R.button).stroke(Theme.C.border))
             if let hint { Text(hint).font(Theme.F.caption).foregroundStyle(Theme.C.text4) }
-            if let r = results[key] { StatusLine(text: r.text, color: r.ok ? Theme.C.live : Theme.C.rec) }
+            if showResult, let r = results[key] { StatusLine(text: r.text, color: r.ok ? Theme.C.live : Theme.C.rec) }
         }
     }
 
@@ -180,6 +195,18 @@ struct SettingsView: View {
                 results["streamd"] = (code < 400, code < 400 ? "接続できました" : "HTTP \(code)")
             } catch { results["streamd"] = (false, describeError(error)) }
         } else { results["streamd"] = (false, "未設定（音声のみは原画質と同じ通信量になります）") }
+
+        if nzbdlURL.trimmingCharacters(in: .whitespaces).isEmpty {
+            results["nzbdl"] = (false, "未設定（アーカイブは使えません）")
+        } else if let c = NzbDlClient(nzbdlURL, apiKey: nzbdlKey) {
+            do {
+                let page = try await c.items(limit: 1, offset: 0)
+                let n = page.total.map { "テレビ \($0) 件" } ?? "一覧を取得できました"
+                results["nzbdl"] = (true, "接続できました · \(n)")
+            } catch { results["nzbdl"] = (false, describeError(error)) }
+        } else {
+            results["nzbdl"] = (false, nzbdlKey.trimmingCharacters(in: .whitespaces).isEmpty ? "API キーを入れてください" : "URL が不正です")
+        }
 
         let bml = webbmlURL.trimmingCharacters(in: .whitespaces)
         if bml.isEmpty {

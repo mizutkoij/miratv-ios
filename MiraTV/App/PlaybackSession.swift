@@ -12,11 +12,14 @@ final class PlaybackSession: ObservableObject {
     enum Item: Identifiable {
         case live(service: MirakurunService, services: [MirakurunService], client: MirakurunClient)
         case recorded(ESRecorded, EPGStationClient)
+        /// Usenet のアーカイブ（VPS1 の nzb-dl から Range で読む）
+        case usenet(UsenetEntry, NzbDlClient)
 
         var id: String {
             switch self {
             case .live(let s, _, _): "live-\(s.id)"
             case .recorded(let r, _): "rec-\(r.id)"
+            case .usenet(let e, _): "nzb-\(e.id)"
             }
         }
     }
@@ -46,6 +49,12 @@ final class PlaybackSession: ObservableObject {
         seekRequest = time.map { SeekRequest(recordedId: recorded.id, time: max($0, 0)) }
         if case .recorded(let r, _) = item, r.id == recorded.id { expand(); return }
         item = .recorded(recorded, es)
+        minimized = false
+    }
+
+    func playUsenet(_ entry: UsenetEntry, client: NzbDlClient) {
+        if case .usenet(let e, _) = item, e.id == entry.id { expand(); return }
+        item = .usenet(entry, client)
         minimized = false
     }
 
@@ -91,6 +100,8 @@ struct PlayerHost: View {
                 PlayerView(service: service, services: services, client: client)
             case .recorded(let recorded, let es):
                 RecordedPlayerView(recorded: recorded, es: es)
+            case .usenet(let entry, let client):
+                UsenetPlayerView(entry: entry, client: client)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: session.minimized ? nil : .infinity, alignment: .bottom)

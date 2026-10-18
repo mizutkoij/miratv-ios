@@ -3,12 +3,13 @@ import AVKit
 
 /// DESIGN.md「録画（Recordings）」: 予約 / 録画済み / ルール
 struct RecordingsView: View {
-    enum Segment: String, CaseIterable { case reserves = "予約", recorded = "録画済み", rules = "ルール" }
+    enum Segment: String, CaseIterable { case reserves = "予約", recorded = "録画済み", rules = "ルール", archive = "アーカイブ" }
 
     @AppStorage("epgstationURL") private var epgURL = Defaults.epgstationURL
     @EnvironmentObject private var reserves: ReserveStore
     @EnvironmentObject private var epg: EPGStore
     @EnvironmentObject private var session: PlaybackSession
+    @ObservedObject private var archive = UsenetCatalog.shared
 
     @State private var segment: Segment = .reserves
     @State private var recorded: [ESRecorded] = []
@@ -25,6 +26,7 @@ struct RecordingsView: View {
     private var es: EPGStationClient? { EPGStationClient(epgURL) }
 
     private var statusLine: StatusLine {
+        if segment == .archive { return archiveStatus }
         if let errorText { return StatusLine(text: errorText, color: Theme.C.rec) }
         return StatusLine(text: "EPGStation \(storageText.isEmpty ? "" : "· 空き \(storageText)")")
     }
@@ -35,27 +37,44 @@ struct RecordingsView: View {
             VStack(alignment: .leading, spacing: 0) {
                 ScreenHeader(title: "録画", status: statusLine) {
                     HStack(spacing: 8) {
-                        if Servers.chapters != nil {
-                            CircleButton(systemName: "text.magnifyingglass") { showCaptionSearch = true }
-                                .accessibilityLabel("字幕で探す")
+                        if segment == .archive {
+                            // タップで新しい分だけ。長押しで全件を取り直す（件数が合わないときなど）
+                            CircleButton(systemName: "arrow.clockwise") { Task { await archive.refresh() } }
+                                .contextMenu {
+                                    Button { Task { await archive.refresh(full: true) } } label: {
+                                        Label("一覧を全件取り直す", systemImage: "arrow.triangle.2.circlepath")
+                                    }
+                                }
+                                .disabled(archive.syncing)
+                        } else {
+                            if Servers.chapters != nil {
+                                CircleButton(systemName: "text.magnifyingglass") { showCaptionSearch = true }
+                                    .accessibilityLabel("字幕で探す")
+                            }
+                            CircleButton(systemName: "arrow.clockwise") { Task { await load(force: true) } }
                         }
-                        CircleButton(systemName: "arrow.clockwise") { Task { await load(force: true) } }
                     }
                 }
                 SegmentedPills(options: Segment.allCases, label: { $0.rawValue }, selection: $segment)
                     .padding(.horizontal, 12).padding(.bottom, 10)
 
-                ScrollView {
-                    LazyVStack(spacing: 6) {
-                        switch segment {
-                        case .reserves: reserveRows
-                        case .recorded: recordedRows
-                        case .rules: ruleRows
+                if segment == .archive {
+                    // 検索欄を上に固定し、7 万件の一覧を自前のスクロールで出す
+                    UsenetArchiveView()
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 6) {
+                            switch segment {
+                            case .reserves: reserveRows
+                            case .recorded: recordedRows
+                            case .rules: ruleRows
+                            case .archive: EmptyView()
+                            }
                         }
+                        .padding(.horizontal, 12).padding(.bottom, 16)
                     }
-                    .padding(.horizontal, 12).padding(.bottom, 16)
+                    .refreshable { await load(force: true) }
                 }
-                .refreshable { await load(force: true) }
             }
         }
         .task(id: "\(segment.rawValue)-\(epgURL)") { await load(force: false) }
@@ -252,7 +271,18 @@ struct RecordingsView: View {
 
     // MARK: - 読み込み
 
+    private var archiveStatus: StatusLine {
+        if archive.syncing {
+            let total = archive.progressTotal.map { " / \($0)" } ?? ""
+            return StatusLine(text: "Usenet · 一覧を取得中 \(archive.progressDone)\(total)", color: Theme.C.warn)
+        }
+        if let e = archive.error { return StatusLine(text: e, color: Theme.C.rec) }
+        let updated = archive.lastSync.map { " · 更新 \($0.hm)" } ?? ""
+        return StatusLine(text: "Usenet · \(archive.entries.count) 番組\(updated)")
+    }
+
     private func load(force: Bool) async {
+        if segment == .archive { return }       // アーカイブは UsenetArchiveView が自分で読む（EPGStation は使わない）
         guard let es else { errorText = "EPGStation の URL が設定されていません"; return }
         loading = true
         defer { loading = false }
@@ -274,6 +304,8 @@ struct RecordingsView: View {
             case .rules:
                 rules = try await es.rules()
                 errorText = nil
+            case .archive:
+                break
             }
         } catch {
             errorText = describeError(error)

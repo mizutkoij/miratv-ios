@@ -18,7 +18,13 @@ enum WatchPositions {
         set { UserDefaults.standard.set(newValue, forKey: key) }
     }
 
-    static func position(_ recordedId: Int) -> Double? { all[String(recordedId)] }
+    static func position(_ recordedId: Int) -> Double? { position(key: String(recordedId)) }
+
+    /// 録画以外（Usenet のアーカイブ "nzb-<id>" など）も同じ仕組みで覚える
+    static func position(key: String) -> Double? { all[key] }
+
+    /// 続きの位置を覚えているもののキー（一覧の「続きから」の絞り込み用。1 回の読み出しで全部）
+    static var savedKeys: Set<String> { Set(all.keys) }
 
     /// 0〜1（一覧のバー用）
     static func progress(_ recordedId: Int, duration: Double) -> Double? {
@@ -27,12 +33,16 @@ enum WatchPositions {
     }
 
     static func save(_ recordedId: Int, position: Double, duration: Double) {
+        save(key: String(recordedId), position: position, duration: duration)
+    }
+
+    static func save(key: String, position: Double, duration: Double) {
         guard position.isFinite else { return }
         var a = all
         if position < minimumSeconds || (duration > 0 && duration - position < finishedRemaining) {
-            a.removeValue(forKey: String(recordedId))
+            a.removeValue(forKey: key)
         } else {
-            a[String(recordedId)] = position
+            a[key] = position
         }
         if a.count > 300 { a = Dictionary(uniqueKeysWithValues: a.suffix(200).map { ($0.key, $0.value) }) }
         all = a

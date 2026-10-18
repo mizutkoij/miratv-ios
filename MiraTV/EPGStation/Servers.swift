@@ -55,6 +55,11 @@ enum Servers {
         return u
     }
 
+    /// nzb-dl（Usenet のアーカイブ）。URL か API キーが空なら nil
+    static var nzbdl: NzbDlClient? {
+        NzbDlClient(string("nzbdlURL", Defaults.nzbdlURL), apiKey: string("nzbdlKey", ""))
+    }
+
     /// EPGStation に載っていない局（放送していない副チャンネル等）も一覧に出すか
     static var showInactiveChannels: Bool { UserDefaults.standard.bool(forKey: "showInactiveChannels") }
 }
