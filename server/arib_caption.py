@@ -267,6 +267,7 @@ def _scan_head(f, limit=24 * 1024 * 1024):
         return None
     pmt_pid = None
     caption_pid, av = None, set()
+    audio_pid = None
     sections = {}
     first_pts = {}
     for off in range(sync, len(data) - PKT + 1, PKT):
@@ -314,6 +315,8 @@ def _scan_head(f, limit=24 * 1024 * 1024):
                     k += 5 + eil
                     if st in (0x01, 0x02, 0x1B, 0x24, 0x0F, 0x11, 0x03, 0x04):
                         av.add(epid)
+                        if st in (0x0F, 0x11, 0x03, 0x04) and audio_pid is None:
+                            audio_pid = epid           # 最初の音声（主音声）
                     elif st == 0x06:
                         d = 0
                         while d + 2 <= len(desc):
@@ -338,44 +341,74 @@ def _scan_head(f, limit=24 * 1024 * 1024):
         # 33 ビットの折り返しをまたいでも、いちばん早い PTS を選ぶ（どれか 1 つを基準にした差で比べる）
         ref = next(iter(first_pts.values()))
         start = min(first_pts.values(), key=lambda p: ((p - ref + WRAP // 2) % WRAP) - WRAP // 2)
-    return sync, caption_pid, start
+    return {"sync": sync, "caption_pid": caption_pid, "start": start, "pmt_pid": pmt_pid,
+            "audio_pid": audio_pid, "audio_first_pts": first_pts.get(audio_pid)}
+
+
+_MASK_PID_HI = bytes(v & 0x1F for v in range(256))
+
+
+def _find_packets(data, n, pids):
+    """先頭からパケット単位に並んだ data の、PID が pids のどれかであるパケットの番号（昇順）。
+
+    パケットごとに Python で回すと遅いので、各パケットの 2・3 バイト目だけを抜き出した列（C の速さ）の中で
+    PID の下位バイトを bytes.find で探し、上位ビットが合うものだけ拾う。目的の PID は全体の数 % なので速い"""
+    hi_col = data[1:n * PKT:PKT].translate(_MASK_PID_HI)
+    lo_col = data[2:n * PKT:PKT]
+    hits = []
+    for pid in pids:
+        hi, lo = pid >> 8, bytes([pid & 0xFF])
+        i = lo_col.find(lo)
+        while i >= 0:
+            if hi_col[i] == hi:
+                hits.append(i)
+            i = lo_col.find(lo, i + 1)
+    hits.sort()
+    return hits
 
 
 def extract(path, progress=None):
+    """字幕だけ取り出す"""
+    return scan(path, captions=True, progress=progress)
+
+
+def scan(path, captions=True, audio_sink=None, progress=None):
+    """ファイルを 1 回だけ読んで、字幕の文字と（audio_sink があれば）音声だけの TS を同時に取り出す。
+
+    audio_sink(bytes): PAT・PMT・主音声のパケットだけを並べた小さな TS（録画の 2% ほど）。CM 検出の ffmpeg に流す。
+    映像を含む数 GB を ffmpeg に読ませずに済み、字幕と CM 検出でファイルを 2 回読むことも無くなる"""
     size = os.path.getsize(path)
     with open(path, "rb") as f:
         head = _scan_head(f)
         if not head:
             raise RuntimeError("not a TS or no PMT")
-        sync, cpid, start = head
+        sync, cpid, start = head["sync"], head["caption_pid"], head["start"]
         out = []
-        if cpid is None:
-            return {"start": start, "captions": out, "caption_pid": None}
+        kinds = {}
+        if captions and cpid is not None:
+            kinds[cpid] = "cap"
+        if audio_sink and head["audio_pid"] is not None and head["pmt_pid"] is not None:
+            kinds[0] = kinds[head["pmt_pid"]] = "psi"
+            kinds[head["audio_pid"]] = "aud"
+        result = {"start": start, "captions": out, "caption_pid": cpid if captions else None,
+                  "audio_pid": head["audio_pid"], "audio_first_pts": head["audio_first_pts"]}
+        if not kinds:
+            return result
         f.seek(sync)
-        hi = cpid >> 8
-        # byte 1 = TEI|PUSI|priority|PID(12..8): every value whose low 5 bits are the PID's high bits
-        b1 = bytes(v for v in range(256) if (v & 0x1F) == hi)
-        # 先読み (?=...) にして、重なった一致も取りこぼさない（PID の下位バイトが 0x47 のとき）
-        pat = re.compile(b"(?=\x47[" + b"".join(b"\\x%02x" % v for v in b1) + b"]" + re.escape(bytes([cpid & 0xFF])) + b")")
         dec = Decoder()
-        pes, pes_pts = None, None
-        last_t = 0.0
-        pos = sync
-        chunk_size = PKT * 21845                       # ~4 MB, a whole number of packets
-        tail = b""
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            data = tail + chunk
-            base = pos - len(tail)
-            usable = len(data) - (len(data) % PKT)
-            for m in pat.finditer(data, 0, usable):
-                off = m.start()
-                if (base + off - sync) % PKT:
-                    continue
+        st = {"pes": None, "pts": None, "last_t": 0.0}
+
+        def handle(data, n):
+            """data の先頭から n パケット（同期が取れている範囲）を処理する"""
+            audio = []
+            for i in _find_packets(data, n, kinds):
+                off = i * PKT
                 pkt = data[off:off + PKT]
-                if len(pkt) < PKT or pkt[1] & 0x80:    # 壊れたパケット（transport_error）は使わない
+                if pkt[1] & 0x80:                      # 壊れたパケット（transport_error）は使わない
+                    continue
+                kind = kinds.get(((pkt[1] & 0x1F) << 8) | pkt[2])
+                if kind != "cap":
+                    audio.append(pkt)
                     continue
                 afc = (pkt[3] >> 4) & 3
                 p = 4
@@ -385,23 +418,57 @@ def extract(path, progress=None):
                     continue
                 payload = pkt[p:]
                 if pkt[1] & 0x40:                      # start of a new PES: finish the previous one
-                    if pes is not None:
-                        last_t = _emit(pes, pes_pts, start, dec, out, last_t)
-                    pes, pes_pts = None, None
+                    if st["pes"] is not None:
+                        st["last_t"] = _emit(st["pes"], st["pts"], start, dec, out, st["last_t"])
+                    st["pes"], st["pts"] = None, None
                     if payload[:3] == b"\x00\x00\x01" and len(payload) >= 9:
                         hlen = payload[8]
                         if payload[7] & 0x80 and len(payload) >= 14:
-                            pes_pts = _pts(payload[9:14])
-                        pes = bytearray(payload[9 + hlen:])
-                elif pes is not None:
-                    pes += payload
-            tail = data[usable:]
+                            st["pts"] = _pts(payload[9:14])
+                        st["pes"] = bytearray(payload[9 + hlen:])
+                elif st["pes"] is not None:
+                    st["pes"] += payload
+            if audio:
+                audio_sink(b"".join(audio))
+
+        pos = sync
+        chunk_size = PKT * 21845                       # ~4 MB, a whole number of packets
+        tail = b""
+        eof = False
+        while not eof:
+            chunk = f.read(chunk_size)
+            eof = not chunk
+            data = tail + chunk                        # 先頭はいつもパケットの頭（同期を取り直した位置）
+            usable = len(data) - (len(data) % PKT)
+            n = usable // PKT
+            heads = data[0:usable:PKT]
+            if heads.count(0x47) == n:
+                handle(data, n)
+                tail = data[usable:]
+            else:
+                # 途中で 1 バイト欠けた・増えたなど、同期がずれた: ずれる前までを処理し、次の同期位置から続ける
+                k = next(i for i, b in enumerate(heads) if b != 0x47)
+                handle(data, k)
+                j = k * PKT + 1
+                while True:
+                    j = data.find(b"\x47", j)
+                    if j < 0 or j + 2 * PKT >= len(data):
+                        break
+                    if data[j + PKT] == 0x47 and data[j + 2 * PKT] == 0x47:
+                        break
+                    j += 1
+                # 見つからなければ、末尾の少しだけ残して次の読み込みで探す
+                tail = data[j:] if j >= 0 and j + 2 * PKT < len(data) else data[max(len(data) - 3 * PKT, k * PKT + 1):]
+                if eof and len(tail) >= PKT:
+                    eof = False                        # 残りにまだ処理できる分がある（もう読むものは無い）
+                    if tail == data:                   # 進まないなら終わり
+                        break
             pos += len(chunk)
             if progress:
                 progress(min(pos / size, 0.99))
-        if pes is not None:
-            _emit(pes, pes_pts, start, dec, out, last_t)
-    return {"start": start, "captions": out, "caption_pid": cpid}
+        if st["pes"] is not None:
+            _emit(st["pes"], st["pts"], start, dec, out, st["last_t"])
+    return result
 
 
 def _emit(pes, pts, start, dec, out, last_t):

@@ -8,6 +8,8 @@ Environment=HOST=192.0.2.10
 Environment=PORT=23235
 Environment=RECORDED_DIR=/home/homeserver/recorded
 Environment=FFMPEG=/home/homeserver/epgstation_downloader/ffmpeg
+# 録り終わった録画の CM と字幕を、開く前に作っておく（空にすると、アプリで開いたときだけ）
+Environment=EPGSTATION_URL=http://192.0.2.10:8888
 # recording machine: never compete with recpt1/Mirakurun
 Nice=19
 IOSchedulingClass=idle
