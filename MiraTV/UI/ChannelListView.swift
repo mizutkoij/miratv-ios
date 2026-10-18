@@ -4,12 +4,12 @@ import SwiftUI
 struct ChannelListView: View {
     @AppStorage("mirakurunURL") private var serverURL = Defaults.mirakurunURL
     @EnvironmentObject private var epg: EPGStore
+    @EnvironmentObject private var session: PlaybackSession
 
     @State private var services: [MirakurunService] = []
     @State private var loading = false
     @State private var errorText: String?
     @State private var band = "GR"
-    @State private var playing: MirakurunService?
     @State private var now = Date()
     private let ticker = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
@@ -91,17 +91,14 @@ struct ChannelListView: View {
             now = t
             Task { await epg.refreshOverview(es: Servers.epgstation) }
         }
-        .fullScreenCover(item: $playing) { s in
-            if let client {
-                PlayerView(service: s, services: items(in: bandOf(s)), client: client)
-            }
-        }
     }
 
     private func row(_ s: MirakurunService) -> some View {
         let p = epg.current(s, at: now)
         let next = epg.upcoming(s, at: now, limit: 1).first
-        return Button { playing = s } label: {
+        return Button {
+            if let client { session.playLive(s, services: items(in: bandOf(s)), client: client) }
+        } label: {
             HStack(alignment: .top, spacing: 12) {
                 VStack(spacing: 4) {
                     LogoTile(url: client?.logoURL(for: s), size: Theme.Logo.list)

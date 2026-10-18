@@ -16,7 +16,7 @@ struct PlayerView: View {
     @StateObject private var network = NetworkKind()
     @EnvironmentObject private var epg: EPGStore
     @EnvironmentObject private var radio: RadioPlayer
-    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var session: PlaybackSession
     @AppStorage("autoLowDataOnCellular") private var autoLowData = false
     /// 変換配信（EPGStation の ffmpeg）を使うか。既定はオフ＝サーバーに変換の負荷をかけない
     @AppStorage("allowServerTranscode") private var allowTranscode = false
@@ -94,16 +94,24 @@ struct PlayerView: View {
     }
 
     var body: some View {
-        GeometryReader { geo in
-            let landscape = geo.size.width > geo.size.height
-            ZStack {
-                (landscape ? Theme.C.video : Theme.C.bg).ignoresSafeArea()
-                if landscape { landscapeLayout } else { portraitLayout }
+        // Group だと onAppear / onDisappear が中の各分岐に付き、たたむたびに再生が止まって最初からになる。
+        // ZStack は 1 つの入れ物なので、再生画面が消えるとき（× で閉じたとき）だけ呼ばれる
+        ZStack {
+            if session.minimized {
+                miniBar
+            } else {
+                GeometryReader { geo in
+                    let landscape = geo.size.width > geo.size.height
+                    ZStack {
+                        (landscape ? Theme.C.video : Theme.C.bg).ignoresSafeArea()
+                        if landscape { landscapeLayout } else { portraitLayout }
+                    }
+                }
             }
         }
         .preferredColorScheme(.dark)
-        .statusBarHidden(true)
-        .persistentSystemOverlays(.hidden)
+        .statusBarHidden(!session.minimized)
+        .persistentSystemOverlays(session.minimized ? .automatic : .hidden)
         .onChange(of: dataMode) { _, v in DebugLog.log("ui", "dataMode=\(v) bml.ready=\(bml.ready) status=\(bml.status) footprint=\(DebugLog.footprintMB()) MB")
             guard v else { return }
             for sec in [4.0, 12.0] {
@@ -239,6 +247,7 @@ struct PlayerView: View {
     private func select(_ s: MirakurunService) {
         guard s.id != current.id else { return }
         current = s
+        session.updateLive(s)      // 一覧で「いま見ている局」を押したら、作り直さずに広げるだけにする
         captions.clear()
         startPlayback()
     }
@@ -339,6 +348,38 @@ struct PlayerView: View {
         }
     }
 
+    // MARK: - ミニプレイヤー（たたんだとき）
+
+    private var isMutedNow: Bool { isHLS ? hls.isMuted : engine.isMuted }
+
+    private var miniBar: some View {
+        MiniPlayerBar(
+            title: program?.title ?? current.name,
+            subtitle: "\(current.name) · \(qualityLabel)",
+            video: {
+                if isAudioOnly {
+                    LogoTile(url: client.logoURL(for: current), size: Theme.Logo.card)
+                } else if isHLS {
+                    PlayerLayerSurface(player: hls.player)
+                } else {
+                    VideoSurface(layer: engine.displayLayer)
+                }
+            },
+            trailing: {
+                Button {
+                    if isHLS { hls.isMuted.toggle() } else { engine.isMuted.toggle() }
+                } label: {
+                    Image(systemName: isMutedNow ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Theme.C.text).frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isMutedNow ? "消音を解除" : "消音")
+            },
+            onExpand: { session.expand() },
+            onClose: { session.close() })
+    }
+
     // MARK: - 縦
 
     private var portraitLayout: some View {
@@ -351,7 +392,7 @@ struct PlayerView: View {
                 boxedVideo
                 statusOverlay
                 CircleButton(systemName: "chevron.down", size: 36, fill: Color.black.opacity(0.55),
-                             foreground: Theme.C.text) { dismiss() }
+                             foreground: Theme.C.text) { session.minimize() }
                     .padding(12)
             }
             .frame(maxWidth: .infinity)
@@ -709,24 +750,40 @@ struct VideoSurface: UIViewRepresentable {
     func makeUIView(context: Context) -> HostView {
         let v = HostView()
         v.backgroundColor = .black
-        v.videoLayer = layer
+        v.attach(layer)
         return v
     }
 
+    /// ここでは付け直さない（全画面 ⇄ ミニの切替中は 2 つの View が同時にあり、取り合いになるため）。
+    /// 付けるのは作ったとき（makeUIView）だけ。新しく出た方がレイヤーを持つ
     func updateUIView(_ uiView: HostView, context: Context) {}
 
+    static func dismantleUIView(_ v: HostView, coordinator: ()) {
+        // まだ自分が持っている場合だけ外す（すでに新しい方に移っていたら触らない）
+        if v.videoLayer?.superlayer === v.layer { v.videoLayer?.removeFromSuperlayer() }
+        v.releaseLayer()
+    }
+
     final class HostView: UIView {
-        var videoLayer: CALayer? {
-            didSet {
-                oldValue?.removeFromSuperlayer()
-                if let videoLayer { layer.addSublayer(videoLayer) }
-            }
+        private(set) var videoLayer: CALayer?
+
+        /// 映像のレイヤーをこの View に付ける。1 つのレイヤーは 1 か所にしか付けられないので、
+        /// ほかの View に付いていればそこから外れてこちらに移る
+        func attach(_ l: CALayer) {
+            videoLayer = l
+            layer.addSublayer(l)
+            setNeedsLayout()
         }
+
+        func releaseLayer() { videoLayer = nil }
+
         override func layoutSubviews() {
             super.layoutSubviews()
+            // たたむアニメーション中は古い View もしばらく残る。レイヤーがもう別の View に移っていたら大きさを変えない
+            guard let videoLayer, videoLayer.superlayer === layer else { return }
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            videoLayer?.frame = bounds
+            videoLayer.frame = bounds
             CATransaction.commit()
         }
     }

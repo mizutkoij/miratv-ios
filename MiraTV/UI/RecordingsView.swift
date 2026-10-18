@@ -8,6 +8,7 @@ struct RecordingsView: View {
     @AppStorage("epgstationURL") private var epgURL = Defaults.epgstationURL
     @EnvironmentObject private var reserves: ReserveStore
     @EnvironmentObject private var epg: EPGStore
+    @EnvironmentObject private var session: PlaybackSession
 
     @State private var segment: Segment = .reserves
     @State private var recorded: [ESRecorded] = []
@@ -16,7 +17,6 @@ struct RecordingsView: View {
     @State private var storageText = ""
     @State private var errorText: String?
     @State private var loading = false
-    @State private var playing: ESRecorded?
     @State private var ruleToDelete: ESRule?
     @State private var now = Date()
     private let ticker = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
@@ -66,9 +66,6 @@ struct RecordingsView: View {
             Button("キャンセル", role: .cancel) { ruleToDelete = nil }
         } message: {
             Text("「\(ruleToDelete?.keyword ?? "")」のルールと、そこから作られた予約が消えます。録画済みの番組は消えません。")
-        }
-        .fullScreenCover(item: $playing) { rec in
-            if let es { RecordedPlayerView(recorded: rec, es: es) }
         }
     }
 
@@ -133,7 +130,7 @@ struct RecordingsView: View {
         Group {
             if recorded.isEmpty && !loading { empty("録画はありません") }
             ForEach(recorded) { rec in
-                Button { playing = rec } label: { recordedRow(rec) }
+                Button { if let es { session.playRecorded(rec, es: es) } } label: { recordedRow(rec) }
                     .buttonStyle(.plain)
                     .disabled(rec.videoFiles?.isEmpty ?? true)
             }

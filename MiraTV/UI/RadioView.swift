@@ -148,11 +148,12 @@ struct RadioStationView: View {
     @State private var showPicker = false
     @State private var picked = Date()
 
-    /// nzb アーカイブは 2026-05-13 ごろから（実測: それ以前は全局 0 件。5/19 は全局で欠落）
+    /// 再生できる nzb アーカイブの先頭（実機ではなくサーバーで再生要求して確認: 7/9 以前は nzb ファイルが無く 502。
+    /// 一覧（DB）には 5/13 から載るが、Discord の nzb バックアップは 2026-07-07 が最古で、旧 VPS1 の消失(9/5)で原本が無い）
     private var archiveStart: Date {
         // NHK は専用の取り込みが始まった 2026-09-08 ごろから（それ以前は数日に 1 件だけ）
         var c = DateComponents(); c.year = 2026
-        if station.source == .nhk { c.month = 9; c.day = 8 } else { c.month = 5; c.day = 13 }
+        if station.source == .nhk { c.month = 9; c.day = 8 } else { c.month = 7; c.day = 13 }
         return Calendar.current.date(from: c) ?? Date.distantPast
     }
 
@@ -217,7 +218,7 @@ struct RadioStationView: View {
                     .datePickerStyle(.graphical)
                     .environment(\.locale, Locale(identifier: "ja_JP"))
                 Text(station.source == .nhk ? "NHK のアーカイブは 2026年9月8日 以降です"
-                                            : "アーカイブは 2026年5月13日 以降です（5月19日は全局で欠けています）")
+                                            : "再生できるアーカイブは 2026年7月13日 以降です（それ以前は一覧に出ても、元の nzb が失われていて再生できません）")
                     .font(Theme.F.caption).foregroundStyle(Theme.C.text3)
                     .padding(.horizontal, 16)
                 Spacer()

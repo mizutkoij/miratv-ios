@@ -13,7 +13,7 @@ struct RecordedPlayerView: View {
     @StateObject private var bml = BMLController()
     @StateObject private var captions = CaptionController()
     @EnvironmentObject private var radio: RadioPlayer
-    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var session: PlaybackSession
 
     @State private var avPlayer: AVPlayer?
     @State private var dataMode = false
@@ -46,8 +46,11 @@ struct RecordedPlayerView: View {
     }
 
     var body: some View {
-        Group {
-            if useAVPlayer {
+        // Group だと onAppear / onDisappear が各分岐に付き、たたむたびに最初から再生し直しになる（ZStack にする）
+        ZStack {
+            if session.minimized {
+                miniBar
+            } else if useAVPlayer {
                 mp4Layout
             } else {
                 GeometryReader { geo in
@@ -60,7 +63,7 @@ struct RecordedPlayerView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .statusBarHidden(true)
+        .statusBarHidden(!session.minimized)
         .onChange(of: dataMode) { _, v in DebugLog.log("ui", "dataMode=\(v) bml.ready=\(bml.ready) status=\(bml.status) footprint=\(DebugLog.footprintMB()) MB")
             guard v else { return }
             for sec in [4.0, 12.0] {
@@ -321,6 +324,42 @@ struct RecordedPlayerView: View {
         if !captionsOn { captions.clear() }
     }
 
+    // MARK: - ミニプレイヤー（たたんだとき）
+
+    @State private var mp4Paused = false
+
+    private var miniBar: some View {
+        let paused = useAVPlayer ? mp4Paused : engine.isPaused
+        return MiniPlayerBar(
+            title: recorded.name ?? "録画",
+            subtitle: useAVPlayer ? "録画 · MP4" : "録画 · \(clock(engine.position)) / \(clock(engine.duration))",
+            video: {
+                if useAVPlayer {
+                    if let avPlayer { PlayerLayerSurface(player: avPlayer) }
+                } else {
+                    VideoSurface(layer: engine.displayLayer)
+                }
+            },
+            trailing: {
+                Button {
+                    if useAVPlayer {
+                        guard let p = avPlayer else { return }
+                        if p.rate == 0 { p.play(); mp4Paused = false } else { p.pause(); mp4Paused = true }
+                    } else {
+                        engine.togglePause()
+                    }
+                } label: {
+                    Image(systemName: paused ? "play.fill" : "pause.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(Theme.C.text).frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(paused ? "再生" : "一時停止")
+            },
+            onExpand: { session.expand() },
+            onClose: { session.close() })
+    }
+
     // MARK: - 縦
 
     private var portraitLayout: some View {
@@ -328,7 +367,7 @@ struct RecordedPlayerView: View {
             ZStack(alignment: .topLeading) {
                 videoStack
                 CircleButton(systemName: "chevron.down", size: 36, fill: Color.black.opacity(0.55),
-                             foreground: Theme.C.text) { dismiss() }
+                             foreground: Theme.C.text) { session.minimize() }
                     .padding(12)
             }
             .frame(maxWidth: .infinity)
@@ -462,7 +501,7 @@ struct RecordedPlayerView: View {
                 // 標準のプレイヤー画面（PiP ボタン付き）。SwiftUI の VideoPlayer には PiP ボタンが出ない
                 if let avPlayer { SystemPlayerView(player: avPlayer) }
                 CircleButton(systemName: "chevron.down", size: 36, fill: Color.black.opacity(0.55),
-                             foreground: Theme.C.text) { dismiss() }
+                             foreground: Theme.C.text) { session.minimize() }
                     .padding(12)
             }
             .frame(maxWidth: .infinity)

@@ -7,6 +7,7 @@ struct MiraTVApp: App {
     @StateObject private var radio = RadioPlayer()
     @StateObject private var epg = EPGStore()
     @StateObject private var reserves = ReserveStore()
+    @StateObject private var session = PlaybackSession()
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
@@ -32,18 +33,28 @@ struct MiraTVApp: App {
 
     var body: some Scene {
         WindowGroup {
+            ZStack(alignment: .bottom) {
             TabView {
-                ChannelListView()
+                ChannelListView().miniPlayerInset()
                     .tabItem { Label("テレビ", systemImage: "tv") }
-                GuideView()
+                GuideView().miniPlayerInset()
                     .tabItem { Label("番組表", systemImage: "square.grid.3x3") }
-                RadioView()
+                RadioView().miniPlayerInset()
                     .tabItem { Label("ラジオ", systemImage: "radio") }
-                RecordingsView()
+                RecordingsView().miniPlayerInset()
                     .tabItem { Label("録画", systemImage: "record.circle") }
-                SettingsView()
+                SettingsView().miniPlayerInset()
                     .tabItem { Label("設定", systemImage: "gearshape") }
             }
+                // 再生画面。閉じるまで作り直さないので、たたんでも再生が続く
+                if let item = session.item {
+                    PlayerHost(item: item).id(item.id)
+                }
+            }
+            .onChange(of: radio.mode) { _, m in
+                if m != .idle { session.close() }      // ラジオを鳴らしたらテレビは閉じる
+            }
+            .environmentObject(session)
             .environmentObject(radio)
             .environmentObject(epg)
             .environmentObject(reserves)
