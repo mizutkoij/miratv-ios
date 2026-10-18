@@ -58,6 +58,10 @@ targets:
               NSExceptionAllowsInsecureHTTPLoads: true
             "192.0.2.20":
               NSExceptionAllowsInsecureHTTPLoads: true
+            # VPS1 の nzb-dl（Usenet アーカイブ）。NSAllowsLocalNetworking 等があると NSAllowsArbitraryLoads は
+            # 効かず（実機で -1022）、IP ごとの例外が要る。新しい接続先を増やしたらここにも足す
+            "192.0.2.99":
+              NSExceptionAllowsInsecureHTTPLoads: true
 
   MiraTVWidgets:
     type: app-extension

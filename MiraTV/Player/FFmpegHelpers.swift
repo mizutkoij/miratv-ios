@@ -19,6 +19,11 @@ extension AVRational {
     var double: Double { den == 0 ? 0 : Double(num) / Double(den) }
 }
 
+/// エラー文に載る URL の apikey=... は伏せる（画面・ログ・スクリーンショットに鍵が残らないように）
+func redactSecrets(_ s: String) -> String {
+    s.replacingOccurrences(of: "apikey=[^&\\s]+", with: "apikey=***", options: .regularExpression)
+}
+
 /// 通信エラーの原因が分かるように、種類・コード・失敗した URL・下位エラーまで文字列にする
 func describeError(_ error: Error) -> String {
     let ns = error as NSError
@@ -32,7 +37,7 @@ func describeError(_ error: Error) -> String {
         let ats = Bundle.main.object(forInfoDictionaryKey: "NSAppTransportSecurity")
         s += "\nATS(実行時): " + (ats.map { "\($0)" } ?? "設定なし")
     }
-    return s
+    return redactSecrets(s)
 }
 
 struct PipelineError: LocalizedError {
