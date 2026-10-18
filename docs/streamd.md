@@ -20,6 +20,15 @@ iPhone ──▶ streamd :23236 ──▶ Mirakurun /api/services/{id}/stream?de
 - PCR が映像の PID に乗っていたら PCR なし（0x1FFF）と書き換え、PCR 専用 PID（地デジに多い）なら残す
 - PMT が 2 パケットにまたがる場合は書き換えずに通す（ISDB ではまず無い）
 
+## 何がどれだけ流れているかを測る
+```sh
+curl 'http://<tailscale-ip>:23236/probe/<serviceId>?seconds=10'
+# {"in_mbps": {"video": 13.1, "audio": 0.25, "caption": 0.01, "data": 0.9, "si": 0.1}, ...}
+```
+"other" には PMT に載らない PID（地デジの PCR 専用 PID 0x01FF など）が入る。
+データ放送を捨てて意味があるかは、局ごとにこれで実測して決める（映像が大半なら、データを捨てても数 % しか減らない）。
+`/live` を閉じたときもログに同じ内訳が出る。
+
 ## 動かし方（homeserver）
 ```sh
 cp server/streamd.py ~/miratv-chapterd/

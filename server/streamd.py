@@ -9,12 +9,16 @@ per viewer (packet header parsing in Python).
 
   GET /live/<serviceId>?video=0         audio + captions only (~0.2-0.4 Mbps)
   GET /live/<serviceId>?video=1&data=0  video + audio + captions, without data broadcast / other ES
+  GET /probe/<serviceId>?seconds=10     reads the service for N seconds and reports Mbps per kind
+                                        (video / audio / caption / data / si) -- to see what is worth dropping
   GET /health
 
 The PMT is rewritten to list only the kept elementary streams (and the CRC recomputed), so the player does not
 wait for streams that never arrive. If a PMT spans more than one TS packet, it is forwarded unchanged.
 Bound to the Tailscale address only, no auth (same as chapterd).
 """
+import json
+import math
 import os
 import threading
 import time
@@ -67,6 +71,9 @@ class Filter:
         self.pmt_pid = None
         self.keep = {0x0000}            # PAT always. None = 全部通す（PMT を書き換えられなかったとき）
         self.pmt_cache = {}             # original PMT packet bytes -> (rewritten bytes, keep set or None)
+        self.kind = {}                  # pid -> "video" / "audio" / "caption" / "data"（PMT から）
+        self.bytes_in = {}              # kind -> bytes received from Mirakurun
+        self.bytes_out = 0
 
     def _parse_pat(self, pkt):
         if not pkt[1] & 0x40:
@@ -131,6 +138,7 @@ class Filter:
                         es_len = ((sec[i + 3] & 0x0F) << 8) | sec[i + 4]
                         entry = sec[i:i + 5 + es_len]
                         desc = sec[i + 5:i + 5 + es_len]
+                        self.kind[pid] = self._kind(st, desc)
                         if self._want(st, desc):
                             kept_es += entry
                             keep.add(pid)
@@ -161,6 +169,25 @@ class Filter:
         self.keep = new_keep
         return out
 
+    @staticmethod
+    def _kind(stream_type, desc):
+        if stream_type in VIDEO_TYPES:
+            return "video"
+        if stream_type in AUDIO_TYPES:
+            return "audio"
+        if stream_type == PES_PRIVATE:
+            tag = component_tag(desc)
+            if tag is not None and 0x30 <= tag <= 0x3F:
+                return "caption"
+        return "data"
+
+    def summary(self, seconds):
+        s = max(seconds, 0.001)
+        mbps = {k: round(v * 8 / s / 1e6, 3) for k, v in sorted(self.bytes_in.items())}
+        total = round(sum(self.bytes_in.values()) * 8 / s / 1e6, 3)
+        return {"seconds": round(seconds, 1), "in_mbps": mbps, "in_total_mbps": total,
+                "out_mbps": round(self.bytes_out * 8 / s / 1e6, 3)}
+
     def _want(self, stream_type, desc):
         if stream_type in AUDIO_TYPES:
             return True
@@ -186,6 +213,8 @@ class Filter:
             pkt = bytes(mv[i:i + 188])
             i += 188
             pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+            k = self.kind.get(pid) or ("si" if pid < 0x30 or pid == self.pmt_pid else "other")
+            self.bytes_in[k] = self.bytes_in.get(k, 0) + 188
             if pid == 0x0000:
                 self._parse_pat(pkt)
                 out.append(pkt)
@@ -193,7 +222,9 @@ class Filter:
                 out.append(self._rewrite_pmt(pkt))
             elif self.keep is None or pid in self.keep:
                 out.append(pkt)
-        return b"".join(out), i
+        data = b"".join(out)
+        self.bytes_out += len(data)
+        return data, i
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -215,10 +246,12 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         parts = u.path.strip("/").split("/")
-        if len(parts) != 2 or parts[0] != "live" or not parts[1].isdigit():
+        if len(parts) != 2 or parts[0] not in ("live", "probe") or not parts[1].isdigit():
             self.send_error(404)
             return
         q = urllib.parse.parse_qs(u.query)
+        if parts[0] == "probe":
+            return self._probe(parts[1], q)
         keep_video = q.get("video", ["1"])[0] != "0"
         keep_data = q.get("data", ["0"])[0] == "1"
         src = f"{MIRAKURUN}/api/services/{parts[1]}/stream?decode=1"
@@ -262,7 +295,55 @@ class Handler(BaseHTTPRequestHandler):
             with viewers_lock:
                 viewers -= 1
             dt = max(time.time() - t0, 0.001)
-            log(f"close service={parts[1]} {dt:.0f}s {sent * 8 / dt / 1e6:.2f} Mbps viewers={viewers}")
+            log(f"close service={parts[1]} {dt:.0f}s {sent * 8 / dt / 1e6:.2f} Mbps viewers={viewers} 内訳(受信)={f.summary(dt)['in_mbps']}")
+
+    def _probe(self, sid, q):
+        """その局を N 秒だけ受けて、種類ごとの Mbps を返す（何を捨てると効くかを実測するため）"""
+        try:
+            seconds = float(q.get("seconds", ["10"])[0])
+        except ValueError:
+            seconds = 10
+        if not math.isfinite(seconds):
+            seconds = 10
+        seconds = min(max(seconds, 2), 60)
+        src = f"{MIRAKURUN}/api/services/{sid}/stream?decode=1"
+        req = urllib.request.Request(src, headers={"X-Mirakurun-Priority": "0", "User-Agent": "miratv-streamd"})
+        global viewers
+        f = Filter(True, True)
+        try:
+            up = urllib.request.urlopen(req, timeout=15)
+        except Exception as e:
+            self.send_error(502, "Mirakurun: " + str(e))
+            return
+        with viewers_lock:
+            viewers += 1                   # 測っている間もチューナーを使うので数える
+        t0 = time.time()
+        note = None
+        try:
+            pending = b""
+            while time.time() - t0 < seconds:
+                buf = up.read(CHUNK)
+                if not buf:
+                    break
+                buf = pending + buf
+                _, used = f.feed(buf)
+                pending = buf[used:]
+        except Exception as e:             # 途中で切れても、そこまでの分は返す
+            note = f"途中で受信が止まりました: {e}"
+        finally:
+            up.close()
+            with viewers_lock:
+                viewers -= 1
+        dt = time.time() - t0
+        result = {"service": int(sid), **f.summary(dt)}
+        if note:
+            result["note"] = note
+        body = json.dumps(result, ensure_ascii=False).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
 def main():

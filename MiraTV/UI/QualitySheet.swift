@@ -14,6 +14,12 @@ struct PlaybackChoice: Identifiable, Hashable {
         id: -1, title: "原画質", source: "Mirakurun",
         spec: "MPEG-2 TS · 1440×1080i · 約15Mbps", abilities: "データ放送◯ 5.1ch◯ 主/副音声◯")
 
+    /// ワンセグ（地上波のみ）。同じ電波に最初から入っている低解像度の放送をそのまま受ける。
+    /// サーバーは何も変換しない（Mirakurun が同じチューナーから取り出すだけ）
+    static let oneSeg = PlaybackChoice(
+        id: -3, title: "ワンセグ", source: "Mirakurun",
+        spec: "H.264 · 320×180 前後 · 約0.3〜0.5Mbps（変換なし）", abilities: "モバイル回線向け · データ放送× 画質は低い")
+
     /// 音声のみ。relay = 自前の中継（streamd）が映像のパケットを捨てて送る（エンコードなし・通信量 約 1/50）。
     /// 中継が無ければ、原画質のストリームを受けて端末側で映像を捨てる（通信量は原画質と同じ）
     static func audioOnly(relay: Bool) -> PlaybackChoice {
@@ -23,6 +29,11 @@ struct PlaybackChoice: Identifiable, Hashable {
             : PlaybackChoice(id: -2, title: "音声のみ", source: "Mirakurun",
                              spec: "AAC · 映像はデコードしない · 通信量は原画質と同じ", abilities: "電池の節約 · 字幕◯ 主/副音声◯")
     }
+
+    /// 中継が無くても、地上波ならワンセグの音声で軽くできる（音質はワンセグ相当）
+    static let audioOnlyOneSeg = PlaybackChoice(
+        id: -2, title: "音声のみ", source: "Mirakurun（ワンセグ）",
+        spec: "HE-AAC · ワンセグの音声 · 約0.3Mbps（変換なし）", abilities: "モバイル回線向け · 音質はワンセグ相当")
 
     /// id 1000 以上 = EPGStation の変換 M2TS（index は ESLiveHLSModes.m2tsNames の位置）
     static let m2tsBase = 1000

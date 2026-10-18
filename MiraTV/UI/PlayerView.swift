@@ -35,6 +35,9 @@ struct PlayerView: View {
     @State private var m2tsModes: [Int] = []
     /// 音声のみを streamd 経由で再生中か / この画面で streamd が使えなかったか
     @State private var usingRelay = false
+    /// ワンセグ（モード -3 か、ワンセグの音声）で再生中 / この画面でワンセグが開けなかった
+    @State private var usingOneSeg = false
+    @State private var oneSegFailed = false
     @State private var relayFailed = false
     @State private var loadingModes = false
     private let ticker = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
@@ -49,13 +52,27 @@ struct PlayerView: View {
     private var isHLS: Bool { modeID >= 0 && modeID < PlaybackChoice.m2tsBase }
     private var isM2TS: Bool { modeID >= PlaybackChoice.m2tsBase }
     private var isAudioOnly: Bool { modeID == -2 }
+    private var isOneSegMode: Bool { modeID == -3 }
+    /// 全サービス（ワンセグを含む。一覧の `services` はテレビの局だけ）
+    @State private var allServices: [MirakurunService] = []
+    /// いまの局のワンセグ（同じ networkId = 同じ放送局の部分受信サービス）
+    private var oneSegService: MirakurunService? {
+        guard current.channel?.type == "GR" else { return nil }
+        // 同じ放送局でも別の物理チャンネル（中継局の重なり）だと 2 本目のチューナーが要るので、チャンネルも一致させる
+        return allServices.filter {
+            $0.isOneSeg && $0.networkId == current.networkId && $0.channel?.channel == current.channel?.channel
+        }.min { $0.serviceId < $1.serviceId }
+    }
     private var isDualMono: Bool { !isHLS && (program?.isDualMono ?? false) }
     /// 主/副の切替は 2ch の音声なら選べるようにする（番組表の「二か国語」情報が取れていなくても使えるように）
     private var audioSelectable: Bool { !isHLS && (isDualMono || engine.info.audioChannels == 2) }
     private var webBMLURL: URL? { Servers.webBML.flatMap { BMLURL.make(base: $0, service: current) } }
     private var dataAvailable: Bool { modeID == -1 && webBMLURL != nil }
     private var choices: [PlaybackChoice] {
-        let base: [PlaybackChoice] = [.original, .audioOnly(relay: Servers.streamd != nil)]
+        let relay = Servers.streamd != nil && !relayFailed
+        var base: [PlaybackChoice] = [.original]
+        if oneSegService != nil { base.append(.oneSeg) }
+        base.append(!relay && oneSegService != nil ? .audioOnlyOneSeg : .audioOnly(relay: relay))
         guard allowTranscode else { return base }
         return base + PlaybackChoice.fromHLS(hlsNames) + PlaybackChoice.fromM2TS(m2tsNames)
     }
@@ -97,6 +114,7 @@ struct PlayerView: View {
         }
         .onAppear {
             radio.stop()   // テレビとラジオは同時に鳴らさない
+            allServices = client.cachedServices() ?? services
             engine.captionHandler = { packets in
                 if captionsOn { captions.feed(packets) }
             }
@@ -148,6 +166,7 @@ struct PlayerView: View {
     private func startPlayback() {
         engine.audioMode = .both
         usingRelay = false
+        usingOneSeg = false
         let es = Servers.epgstation
         if isHLS, let es {
             engine.stop()
@@ -159,17 +178,27 @@ struct PlayerView: View {
             dataMode = false
             engine.audioOnly = false
             engine.play(url: es.liveM2TSURL(channelId: current.id, mode: m2tsModes[modeID - PlaybackChoice.m2tsBase]))
+        } else if isOneSegMode, !oneSegFailed, let one = oneSegService {
+            // ワンセグ: 同じ電波の低解像度の放送。サーバーは何も変換しない
+            hls.stop()
+            dataMode = false
+            engine.audioOnly = false
+            DebugLog.log("player", "ワンセグで再生 \(one.name) sid=\(one.serviceId)")
+            usingOneSeg = true
+            engine.play(url: client.streamURL(for: one))
         } else {
-            if modeID != -2 { modeID = -1 }
+            if modeID != -2 { modeID = -1 }     // ワンセグの無い局（BS など）に切り替えたら原画質へ
             hls.stop()
             if isAudioOnly { dataMode = false }
             engine.audioOnly = isAudioOnly
-            // 音声のみは、自前の中継があればそこから（映像を抜いた TS、通信量 約 1/50）。失敗したら Mirakurun の原画質から
+            // 音声のみ: 1. 自前の中継（映像を抜いた本放送の音声） 2. ワンセグの音声（地上波） 3. 原画質を受けて端末で映像を捨てる
             if isAudioOnly, !relayFailed, let relay = Servers.streamdAudioURL(current) {
                 usingRelay = true
                 engine.play(url: relay)
+            } else if isAudioOnly, !oneSegFailed, let one = oneSegService {
+                usingOneSeg = true
+                engine.play(url: client.streamURL(for: one))
             } else {
-                usingRelay = false
                 engine.play(url: client.streamURL(for: current))
             }
         }
@@ -177,12 +206,28 @@ struct PlayerView: View {
 
     /// 中継で開けなかった（streamd が止まっている等）→ 以後この画面では Mirakurun から直接
     private func handleEngineState(_ s: PlayerEngine.State) {
-        guard case .failed(let msg) = s, usingRelay else { return }
+        guard case .failed(let msg) = s else { return }
+        if usingOneSeg {
+            // ワンセグが開けなかった → この画面では本放送から（音声のみなら端末で映像を捨てる）
+            DebugLog.log("player", "ワンセグで開けず、本放送で再生: \(msg)")
+            oneSegFailed = true
+            usingOneSeg = false
+            if isOneSegMode { modeID = -1 }
+            engine.audioOnly = isAudioOnly
+            engine.play(url: client.streamURL(for: current))
+            return
+        }
+        guard usingRelay else { return }
         DebugLog.log("player", "streamd で開けず、Mirakurun から音声のみで再生: \(msg)")
         relayFailed = true
         usingRelay = false
         engine.audioOnly = true
-        engine.play(url: client.streamURL(for: current))
+        if !oneSegFailed, let one = oneSegService {
+            usingOneSeg = true
+            engine.play(url: client.streamURL(for: one))
+        } else {
+            engine.play(url: client.streamURL(for: current))
+        }
     }
 
     private func setMode(_ id: Int) {
@@ -233,6 +278,7 @@ struct PlayerView: View {
             return "変換 · \(m2tsNames[modeID - PlaybackChoice.m2tsBase])"
         }
         if isAudioOnly { return "音声のみ" }
+        if isOneSegMode { return "ワンセグ" }
         switch engine.info.audioChannels {
         case 0: return "原画質"
         case 6: return "原画質 · 5.1ch"

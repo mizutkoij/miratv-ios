@@ -17,6 +17,9 @@ struct MirakurunService: Decodable, Identifiable, Hashable {
 
     /// 0x01 = デジタルTV, 0xAD = 超高精細度4K専用TV。ラジオ・データ専用サービスは除外する
     var isTV: Bool { type == nil || type == 0x01 || type == 0xAD }
+
+    /// ワンセグ（部分受信サービス、service_type 0xC0）。地上波だけにある
+    var isOneSeg: Bool { type == 0xC0 && channel?.type == "GR" }
 }
 
 struct MirakurunClient {
