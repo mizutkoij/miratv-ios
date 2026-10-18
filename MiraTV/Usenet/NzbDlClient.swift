@@ -4,7 +4,7 @@ import Foundation
 // 仕様は docs/nzb-stream-playback.md（2026-10-19 の実測）。応答の形は細部が未確認なので、
 // JSONSerialization で寛容に読む（キー名の揺れ・数値/文字列の揺れを吸収する）。
 //
-// - GET /api/items?category=tv&status=on&limit=&offset=   一覧（アップロード順の新しい順）
+// - GET /api/items?status=on&limit=&offset=   一覧（カテゴリで絞らない。アップロード順の新しい順）
 // - GET /api/items/lookup?folder=<名前から .nzb を除いたもの>  中のファイル名
 // - GET /api/stream/<id>?apikey=                           本体ファイル（Range 可）
 
@@ -15,6 +15,8 @@ struct NzbItemRaw: Codable, Hashable {
     let bytes: Int64
     /// アップロード時刻（epoch 秒）。放送日時ではない
     let created: Double
+    /// nzb-dl のカテゴリ（tv / uncategorized / radio …）。古い保存分には無い
+    var category: String? = nil
 }
 
 struct NzbItemsPage {
@@ -86,13 +88,17 @@ struct NzbDlClient {
 
     // MARK: - 一覧
 
-    func items(category: String = "tv", status: String = "on", limit: Int, offset: Int) async throws -> NzbItemsPage {
-        let json = try await getJSON("api/items", [
-            URLQueryItem(name: "category", value: category),
+    /// category = nil: カテゴリで絞らない（tv に加えて uncategorized も、約 1,000 件。実測 2026-10-19: 全体 80,086 / tv 75,811 /
+    /// uncategorized 991 / radio 157）。radio は一覧に出さない（UsenetCatalog 側で除く）
+    func items(category: String? = nil, status: String = "on", limit: Int, offset: Int) async throws -> NzbItemsPage {
+        var q: [URLQueryItem] = []
+        if let category { q.append(URLQueryItem(name: "category", value: category)) }
+        q += [
             URLQueryItem(name: "status", value: status),
             URLQueryItem(name: "limit", value: String(limit)),
             URLQueryItem(name: "offset", value: String(offset)),
-        ], timeout: 30)
+        ]
+        let json = try await getJSON("api/items", q, timeout: 30)
         let list: [Any]
         var total: Int?
         if let arr = json as? [Any] {
@@ -112,7 +118,7 @@ struct NzbDlClient {
               let name = string(d["name"] ?? d["title"]), !name.isEmpty else { return nil }
         let bytes = int64(d["total_bytes"] ?? d["bytes"] ?? d["size"]) ?? 0
         let created = time(d["created_at"] ?? d["enabled_at"]) ?? 0
-        return NzbItemRaw(id: id, name: name, bytes: bytes, created: created)
+        return NzbItemRaw(id: id, name: name, bytes: bytes, created: created, category: string(d["category"]))
     }
 
     // MARK: - 中のファイル

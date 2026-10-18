@@ -293,6 +293,7 @@ final class UsenetCatalog: ObservableObject {
         var groups: [String: [Parsed]] = [:]
         var order: [String] = []
         for it in items {
+            if it.category == "radio" { continue }   // ラジオは radio-web 側で扱う（TV のアーカイブ一覧には出さない）
             let p = parse(it, fmt: fmt)
             let key = p.airDate.map { "\(Int($0.timeIntervalSince1970))|\(normalize(p.station))|\(normalize(p.title))" } ?? "name|\(it.id)"
             if groups[key] == nil { order.append(key) }
