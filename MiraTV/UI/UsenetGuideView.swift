@@ -77,7 +77,7 @@ struct UsenetGuideView: View {
             DatePicker("日付", selection: Binding(
                 get: { day ?? Date() },
                 set: { day = Self.broadcastDay($0.addingTimeInterval(Double(Self.dayStartHour) * 3600 + 60)) }),
-                       in: (range.map { $0.lowerBound...$0.upperBound.addingTimeInterval(86_399) }) ?? Date.distantPast...Date.distantFuture,
+                       in: range ?? Date.distantPast...Date.distantFuture,
                        displayedComponents: .date)
                 .labelsHidden()
                 .environment(\.locale, Locale(identifier: "ja_JP"))

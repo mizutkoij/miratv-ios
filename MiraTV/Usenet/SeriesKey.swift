@@ -80,7 +80,9 @@ enum SeriesKey {
         ("\\s*第\\s*[0-9一二三四五六七八九十百千]+\\s*(話|回|夜|部|章|節|弾|集|週|期)", true),
         ("\\s*(ep|episode|vol|story|stage|act)\\.?\\s*\\d+", true),
         ("\\s*\\(\\s*\\d{1,4}\\s*\\)", true),
-        ("\\s*(最終回|最終話|終|新|再)\\s*$", false),
+        // 1 文字のもの（終・新・再）は前に空白があるときだけ（「明治維新」の「新」を消さないように）
+        ("\\s*(最終回|最終話)\\s*$", false),
+        ("\\s+(終|新|再)\\s*$", false),
         ("\\s+\\d{1,3}\\s*$", false),
     ].compactMap { pattern, cut in re(pattern).map { ($0, cut) } }
 

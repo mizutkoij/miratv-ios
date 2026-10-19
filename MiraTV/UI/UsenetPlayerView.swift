@@ -1,5 +1,6 @@
 import SwiftUI
 import AVKit
+import Combine
 
 /// Usenet のアーカイブ（VPS1 の nzb-dl）の再生。docs/nzb-stream-playback.md
 ///
@@ -81,8 +82,14 @@ struct UsenetPlayerView: View {
         }
         .onChange(of: engine.isPaused) { _, _ in if mode == .ts { updateNowPlaying() } }
         .onReceive(clockTicker) { _ in onClockTick() }
-        .onChange(of: engine.reachedEnd) { _, ended in if ended && mode == .ts { handleEnded() } }
-        .onReceive(NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification)) { n in
+        .onChange(of: engine.reachedEnd) { _, ended in
+            if ended && mode == .ts { handleEnded() }
+            if !ended { autoNextAt = nil }      // 案内の間に戻して見始めたら、次へは進まない
+        }
+        .onChange(of: autoNext) { _, on in if !on { autoNextAt = nil } }
+        // 終わりの通知は裏のスレッドから来ることがあるので、画面の状態はメインで触る
+        .onReceive(NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification)
+            .receive(on: DispatchQueue.main)) { n in
             if mode == .mp4, let item = n.object as? AVPlayerItem, item === avPlayer?.currentItem { handleEnded() }
         }
         .onDisappear {
@@ -285,10 +292,12 @@ struct UsenetPlayerView: View {
                         .buttonStyle(.bordered).tint(Theme.C.text)
                 }
             }
-            .padding(16)
+            .padding(12)
             .frame(maxWidth: 360, alignment: .leading)
             .background(Color.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 14))
-            .padding(16)
+            .padding(8)
+            // 縦の小さい映像の枠にも収まるように、入りきらなければ縮める
+            .minimumScaleFactor(0.7)
         }
     }
 
@@ -304,7 +313,11 @@ struct UsenetPlayerView: View {
 
     /// 0.25 秒ごと: 5 秒ごとに位置を保存・ロック画面の表示・mp4 の失敗の検出・次の回への自動の切り替え
     private func onClockTick() {
-        if let at = autoNextAt, Date() >= at { playNext(); return }
+        if let at = autoNextAt {
+            // mp4 で案内の間に戻した（終わりから離れた）ら、次へは進まない
+            if mode == .mp4, let p = avPlayer, p.rate != 0 { autoNextAt = nil }
+            else if autoNext, Date() >= at { playNext(); return }
+        }
         if mode == .mp4, let item = avPlayer?.currentItem, item.status == .failed {
             let msg = item.error.map { describeError($0) } ?? "再生できませんでした"
             DebugLog.log("nzb", "標準プレイヤーでの再生に失敗 id=\(current?.id ?? "?"): \(msg)")

@@ -63,7 +63,10 @@ struct UsenetArchiveView: View {
         .task(id: filterKey) { reloadSnapshots(); await applyFilter() }
         .onAppear { reloadSnapshots() }
         // 再生画面を閉じた・次の回へ進んだ後に、「続き」「見た」の印を取り直す
-        .onChange(of: session.item?.id) { _, _ in reloadSnapshots() }
+        // （閉じた再生画面が位置を保存するのは消える瞬間なので、少し待ってから読む）
+        .onChange(of: session.item?.id) { _, _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { reloadSnapshots() }
+        }
     }
 
     private func reloadSnapshots() {

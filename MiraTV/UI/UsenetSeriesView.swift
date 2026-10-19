@@ -194,7 +194,8 @@ struct UsenetSeriesSheet: View {
                     HStack(spacing: 8) {
                         Image(systemName: "play.fill")
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(positions[next.watchKey] != nil ? "続きから見る" : (watched.isEmpty ? "最初の回から見る" : "次の回を見る"))
+                            Text(positions[next.watchKey] != nil ? "続きから見る"
+                                 : (members.contains { watched.contains($0.id) } ? "次の回を見る" : "最初の回から見る"))
                                 .font(Theme.F.jp(14, .bold))
                             Text("\(next.airDate.map(Self.dayText) ?? "") \(next.title)")
                                 .font(Theme.F.caption).lineLimit(1)
