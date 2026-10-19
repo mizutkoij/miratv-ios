@@ -25,10 +25,27 @@ struct UsenetEntry: Identifiable, Hashable {
     let alternates: [NzbItemRaw]
     /// 検索用（全角→半角、ひらがな→カタカナ、小文字）
     let searchKey: String
+    /// シリーズ名（表示用）と、まとめるためのキー（SeriesKey）
+    let seriesTitle: String
+    let seriesKey: String
 
     var watchKey: String { "nzb-\(id)" }
     /// 本命の item
     var primary: NzbItemRaw { NzbItemRaw(id: id, name: name, bytes: bytes, created: 0) }
+}
+
+/// 同じ番組の別の回をまとめたもの（2 回以上あるものだけ）
+struct UsenetSeries: Identifiable, Hashable {
+    let key: String
+    let title: String
+    /// いちばん多く出てくる局
+    let station: String
+    /// 出てくる局の数
+    let stationCount: Int
+    let count: Int
+    let first: Date?
+    let latest: Date?
+    var id: String { key }
 }
 
 struct StationCount: Hashable, Identifiable {
@@ -45,6 +62,10 @@ final class UsenetCatalog: ObservableObject {
     @Published private(set) var entries: [UsenetEntry] = []
     /// 局ごとの件数（多い順）
     @Published private(set) var stations: [StationCount] = []
+    /// シリーズ（最新の回が新しい順）
+    @Published private(set) var series: [UsenetSeries] = []
+    /// シリーズのキー → その回（放送の古い順）
+    private(set) var seriesMembers: [String: [UsenetEntry]] = [:]
     @Published private(set) var syncing = false
     /// 取得中の件数（done / サーバーの総数）
     @Published private(set) var progressDone = 0
@@ -236,6 +257,8 @@ final class UsenetCatalog: ObservableObject {
         guard gen == rebuildGeneration else { return }
         entries = result.entries
         stations = result.stations
+        series = result.series
+        seriesMembers = result.members
         revision += 1
     }
 
@@ -260,6 +283,16 @@ final class UsenetCatalog: ObservableObject {
         UserDefaults.standard.set(d, forKey: Self.extKey)
     }
 
+    // MARK: - シリーズ
+
+    /// 同じシリーズの次の回（放送日時が後のもののうち一番近いもの）。無ければ nil
+    func nextInSeries(_ e: UsenetEntry) -> UsenetEntry? {
+        guard let list = seriesMembers[e.seriesKey], let i = list.firstIndex(where: { $0.id == e.id }) else { return nil }
+        return list[(i + 1)...].first { $0.airDate != e.airDate }
+    }
+
+    func members(of key: String) -> [UsenetEntry] { seriesMembers[key] ?? [] }
+
     // MARK: - 探す
 
     /// 局と文字で絞る。文字は空白で区切ると全部を含むもの（全角/半角・ひらがな/カタカナは区別しない）。
@@ -270,6 +303,20 @@ final class UsenetCatalog: ObservableObject {
         return entries.filter { e in
             if let station, e.station != station { return false }
             return tokens.allSatisfy { e.searchKey.contains($0) }
+        }
+    }
+
+    /// シリーズを局と文字で絞る（シリーズ名と局で探す）
+    nonisolated static func filterSeries(_ list: [UsenetSeries], query: String, station: String?,
+                                         members: [String: [UsenetEntry]]) -> [UsenetSeries] {
+        let tokens = normalize(query).split(whereSeparator: { $0 == " " }).map(String.init)
+        if tokens.isEmpty && station == nil { return list }
+        return list.filter { s in
+            if let station, s.station != station,
+               !(members[s.key]?.contains { $0.station == station } ?? false) { return false }
+            if tokens.isEmpty { return true }
+            let hay = s.key + " " + normalize(s.station)
+            return tokens.allSatisfy { hay.contains($0) }
         }
     }
 
@@ -284,7 +331,14 @@ final class UsenetCatalog: ObservableObject {
         let reupload: Int
     }
 
-    private nonisolated static func build(_ items: [NzbItemRaw]) -> (entries: [UsenetEntry], stations: [StationCount]) {
+    private struct Built {
+        let entries: [UsenetEntry]
+        let stations: [StationCount]
+        let series: [UsenetSeries]
+        let members: [String: [UsenetEntry]]
+    }
+
+    private nonisolated static func build(_ items: [NzbItemRaw]) -> Built {
         let fmt = DateFormatter()
         fmt.locale = Locale(identifier: "en_US_POSIX")
         fmt.timeZone = TimeZone(identifier: "Asia/Tokyo")
@@ -313,11 +367,13 @@ final class UsenetCatalog: ObservableObject {
             let sorted = g.sorted { $0.reupload < $1.reupload }
             let p = sorted[0]
             let day = p.airDate.map { dayFmt.string(from: $0) } ?? ""
+            let series = SeriesKey.make(title: p.title)
             entries.append(UsenetEntry(
                 id: p.raw.id, name: p.raw.name, bytes: p.raw.bytes, airDate: p.airDate,
                 station: p.station, title: p.title, flags: p.flags,
                 alternates: sorted.dropFirst().map(\.raw),
-                searchKey: normalize("\(p.station) \(p.title) \(day)")))
+                searchKey: normalize("\(p.station) \(p.title) \(day)"),
+                seriesTitle: series.display, seriesKey: series.key))
             if !p.station.isEmpty { counts[p.station, default: 0] += 1 }
         }
         // 放送日時の新しい順（日時が読めないものは最後に、アップロード順のまま）
@@ -330,7 +386,26 @@ final class UsenetCatalog: ObservableObject {
         }
         let stations = counts.map { StationCount(name: $0.key, count: $0.value) }
             .sorted { $0.count != $1.count ? $0.count > $1.count : $0.name < $1.name }
-        return (entries, stations)
+
+        // シリーズ: 放送の古い順に並べた回の一覧（entries は新しい順なので逆から積む）
+        var members: [String: [UsenetEntry]] = [:]
+        for e in entries.reversed() where e.airDate != nil && !e.seriesKey.isEmpty {
+            members[e.seriesKey, default: []].append(e)
+        }
+        members = members.filter { $0.value.count >= 2 }
+        var series: [UsenetSeries] = []
+        series.reserveCapacity(members.count)
+        for (key, list) in members {
+            var st: [String: Int] = [:]
+            for e in list where !e.station.isEmpty { st[e.station, default: 0] += 1 }
+            let top = st.max { $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key }?.key ?? ""
+            // 表示名は最新の回のもの（局の付け方が途中で変わっても、今の名前で出す）
+            series.append(UsenetSeries(key: key, title: list.last?.seriesTitle ?? key, station: top,
+                                       stationCount: st.count, count: list.count,
+                                       first: list.first?.airDate, latest: list.last?.airDate))
+        }
+        series.sort { ($0.latest ?? .distantPast) > ($1.latest ?? .distantPast) }
+        return Built(entries: entries, stations: stations, series: series, members: members)
     }
 
     /// `YYYYMMDD-HHMMSS <局> <番組名>[字][デ]… [reupload-N].nzb`
@@ -404,5 +479,29 @@ final class UsenetCatalog: ObservableObject {
             if let n = Unicode.Scalar(v) { out.append(n) }
         }
         return String(out)
+    }
+}
+
+/// 最後まで見た回（シリーズの一覧で「見た」を出し、次に見る回を決めるため）。
+/// 続きの位置（WatchPositions）は見終わると消えるので、別に持つ
+enum UsenetWatched {
+    private static let key = "nzbWatched.v1"
+
+    static var snapshot: Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+    }
+
+    static func mark(_ id: String) {
+        var list = UserDefaults.standard.stringArray(forKey: key) ?? []
+        guard !list.contains(id) else { return }
+        list.append(id)
+        if list.count > 5_000 { list.removeFirst(list.count - 4_000) }    // 古いものから忘れる
+        UserDefaults.standard.set(list, forKey: key)
+    }
+
+    static func unmark(_ id: String) {
+        var list = UserDefaults.standard.stringArray(forKey: key) ?? []
+        list.removeAll { $0 == id }
+        UserDefaults.standard.set(list, forKey: key)
     }
 }

@@ -1,5 +1,6 @@
 import SwiftUI
 import AVKit
+import Combine
 
 /// Usenet のアーカイブ（VPS1 の nzb-dl）の再生。docs/nzb-stream-playback.md
 ///
@@ -45,6 +46,12 @@ struct UsenetPlayerView: View {
     @State private var toast: String?
     @State private var nowPlaying = TVNowPlaying()
     @State private var lastSaved = Date.distantPast
+    /// 次の回へ自動で進む時刻（見終わったときに数秒待つ。「やめる」で nil）
+    @State private var autoNextAt: Date?
+    /// この回を「見た」にしたか（何度も書かない）
+    @State private var markedWatched = false
+    @AppStorage("nzbAutoNext") private var autoNext = true
+    private static let autoNextDelay: Double = 8
     private let clockTicker = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
 
     private static let speeds: [Double] = [0.75, 1.0, 1.25, 1.5, 2.0]
@@ -75,6 +82,16 @@ struct UsenetPlayerView: View {
         }
         .onChange(of: engine.isPaused) { _, _ in if mode == .ts { updateNowPlaying() } }
         .onReceive(clockTicker) { _ in onClockTick() }
+        .onChange(of: engine.reachedEnd) { _, ended in
+            if ended && mode == .ts { handleEnded() }
+            if !ended { autoNextAt = nil }      // 案内の間に戻して見始めたら、次へは進まない
+        }
+        .onChange(of: autoNext) { _, on in if !on { autoNextAt = nil } }
+        // 終わりの通知は裏のスレッドから来ることがあるので、画面の状態はメインで触る
+        .onReceive(NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification)
+            .receive(on: DispatchQueue.main)) { n in
+            if mode == .mp4, let item = n.object as? AVPlayerItem, item === avPlayer?.currentItem { handleEnded() }
+        }
         .onDisappear {
             // 続きからの位置へまだ飛んでいない（開いてすぐ閉じた）ときは、前の位置を消さない
             if resumeAt == nil && currentPosition > 0 {
@@ -229,8 +246,78 @@ struct UsenetPlayerView: View {
         return engine.duration
     }
 
-    /// 0.25 秒ごと: 5 秒ごとに位置を保存・ロック画面の表示・mp4 の失敗の検出
+    // MARK: - 次の回
+
+    /// 同じシリーズの次の回（UsenetCatalog のシリーズのまとめ）
+    private var nextEpisode: UsenetEntry? { UsenetCatalog.shared.nextInSeries(entry) }
+
+    private func markWatched() {
+        guard !markedWatched else { return }
+        markedWatched = true
+        UsenetWatched.mark(entry.id)
+    }
+
+    /// 最後まで見た: 「見た」にして、次の回があれば少し待ってから進む
+    private func handleEnded() {
+        markWatched()
+        guard autoNext, autoNextAt == nil, nextEpisode != nil else { return }
+        autoNextAt = Date().addingTimeInterval(Self.autoNextDelay)
+    }
+
+    private func playNext() {
+        autoNextAt = nil
+        guard let next = nextEpisode else { return }
+        DebugLog.log("nzb", "次の回へ \(entry.id) → \(next.id)")
+        // 再生画面は作り直される（onDisappear でこの回の位置を保存する）
+        session.playUsenet(next, client: client, keepMinimized: true)
+    }
+
+    /// 見終わったときの「次の回」の案内（数秒後に自動で進む）
+    @ViewBuilder private var nextOverlay: some View {
+        if let at = autoNextAt, let next = nextEpisode {
+            VStack(alignment: .leading, spacing: 10) {
+                // 残り秒数は時計に合わせて描き直す（ほかの状態が変わらなくても進むように）
+                TimelineView(.periodic(from: .now, by: 0.5)) { ctx in
+                    let left = max(Int(ceil(at.timeIntervalSince(ctx.date))), 0)
+                    Text("次の回 · \(left) 秒後に再生").font(Theme.F.jp(12, .bold)).foregroundStyle(Theme.C.text3)
+                }
+                Text(next.title).font(Theme.F.jp(15, .bold)).foregroundStyle(Theme.C.text).lineLimit(2)
+                if let d = next.airDate {
+                    Text("\(Self.shortAir(d)) \(next.station)").font(Theme.F.caption).foregroundStyle(Theme.C.text4)
+                }
+                HStack(spacing: 10) {
+                    Button("今すぐ再生") { playNext() }
+                        .buttonStyle(.borderedProminent).tint(Theme.C.accent)
+                    Button("やめる") { autoNextAt = nil }
+                        .buttonStyle(.bordered).tint(Theme.C.text)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: 360, alignment: .leading)
+            .background(Color.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 14))
+            .padding(8)
+            // 縦の小さい映像の枠にも収まるように、入りきらなければ縮める
+            .minimumScaleFactor(0.7)
+        }
+    }
+
+    private static let shortAirFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "ja_JP")
+        f.timeZone = TimeZone(identifier: "Asia/Tokyo")
+        f.dateFormat = "yy/M/d(E) HH:mm"
+        return f
+    }()
+
+    private static func shortAir(_ d: Date) -> String { shortAirFormatter.string(from: d) }
+
+    /// 0.25 秒ごと: 5 秒ごとに位置を保存・ロック画面の表示・mp4 の失敗の検出・次の回への自動の切り替え
     private func onClockTick() {
+        if let at = autoNextAt {
+            // mp4 で案内の間に戻した（終わりから離れた）ら、次へは進まない
+            if mode == .mp4, let p = avPlayer, p.rate != 0 { autoNextAt = nil }
+            else if autoNext, Date() >= at { playNext(); return }
+        }
         if mode == .mp4, let item = avPlayer?.currentItem, item.status == .failed {
             let msg = item.error.map { describeError($0) } ?? "再生できませんでした"
             DebugLog.log("nzb", "標準プレイヤーでの再生に失敗 id=\(current?.id ?? "?"): \(msg)")
@@ -252,6 +339,9 @@ struct UsenetPlayerView: View {
         }
         let pos = currentPosition
         guard pos.isFinite, pos > 0 else { return }
+        // 残り 90 秒を切ったら「見た」（エンディングを飛ばして閉じても見たことにする。続きの位置が消えるのと同じ基準）
+        let dur = currentDuration
+        if !markedWatched, dur > 120, dur - pos < WatchPositions.finishedRemaining { markWatched() }
         if Date().timeIntervalSince(lastSaved) > 5 {
             lastSaved = Date()
             WatchPositions.save(key: entry.watchKey, position: pos, duration: currentDuration)
@@ -307,6 +397,7 @@ struct UsenetPlayerView: View {
                 .opacity(captionsOn ? 1 : 0)
                 .allowsHitTesting(false)
             stateOverlay
+            nextOverlay
             toastLayer
         }
     }
@@ -341,7 +432,7 @@ struct UsenetPlayerView: View {
                 }
                 .padding()
             default:
-                if engine.reachedEnd {
+                if engine.reachedEnd && autoNextAt == nil {
                     Button { engine.seek(to: 0) } label: {
                         Label("最初から再生", systemImage: "gobackward")
                             .font(Theme.F.jp(14, .bold)).foregroundStyle(Theme.C.onAccent)
@@ -452,6 +543,28 @@ struct UsenetPlayerView: View {
                 if !entry.alternates.isEmpty { TagView(text: "再投稿 \(entry.alternates.count)") }
             }
             Text(statusText).font(Theme.F.caption).foregroundStyle(Theme.C.text4)
+            if let next = nextEpisode {
+                Button { playNext() } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "forward.end.fill").foregroundStyle(Theme.C.accent)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("次の回").font(Theme.F.jp(11, .bold)).foregroundStyle(Theme.C.text3)
+                            Text(next.title).font(Theme.F.jp(13, .bold)).foregroundStyle(Theme.C.text).lineLimit(1)
+                            if let d = next.airDate {
+                                Text(Self.shortAir(d)).font(Theme.F.caption).foregroundStyle(Theme.C.text4)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(12)
+                    .background(Theme.C.row, in: RoundedRectangle(cornerRadius: Theme.R.card))
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 6)
+                Toggle("見終わったら次の回へ進む", isOn: $autoNext)
+                    .tint(Theme.C.accent)
+                    .font(Theme.F.jp(13)).foregroundStyle(Theme.C.text2)
+            }
         }
     }
 
@@ -600,6 +713,7 @@ struct UsenetPlayerView: View {
             ZStack(alignment: .topLeading) {
                 Theme.C.video
                 if let avPlayer { SystemPlayerView(player: avPlayer) }
+                nextOverlay.frame(maxWidth: .infinity, maxHeight: .infinity)
                 toastLayer
                 CircleButton(systemName: "chevron.down", size: 36, fill: Color.black.opacity(0.55),
                              foreground: Theme.C.text) { session.minimize() }
