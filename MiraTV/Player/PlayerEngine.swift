@@ -25,6 +25,8 @@ final class PlayerEngine: ObservableObject {
     @Published private(set) var duration: Double = 0
     @Published private(set) var isSeekable = false
     @Published private(set) var isPaused = false
+    /// データ切れで止まった回数（回線が細いかの目安。画面側が数えて、続くなら音声のみに落とす）
+    @Published private(set) var stallCount = 0
     @Published private(set) var playbackRate: Double = 1
     /// 終端まで再生した
     @Published private(set) var reachedEnd = false
@@ -91,6 +93,8 @@ final class PlayerEngine: ObservableObject {
     var startupBuffer: Double = 0.8
     /// 次の play() を音声のみで行う（映像をデコードしない）
     var audioOnly = false
+    /// 見たいサービス ID（録画に複数の番組が入っているとき、サブチャンネルなどを正しく選ぶため）。play() の前に設定する
+    var preferredServiceId: Int?
     /// いまの再生が音声のみか（clockLock で保護）
     private var audioOnlyMode = false
 
@@ -180,6 +184,7 @@ final class PlayerEngine: ObservableObject {
         let p = TSPipeline(url: url, callbacks: callbacks)
         p.isFileMode = file
         p.audioOnly = audioOnly
+        p.preferredServiceId = preferredServiceId
         p.audioMode = audioMode
         pipeline = p
         p.start()
@@ -218,6 +223,7 @@ final class PlayerEngine: ObservableObject {
             if buffered < 0.05, !(isFile && effectiveDuration > 0 && end - startTime >= effectiveDuration - 1.0) {
                 clockLock.lock(); stalled = true; clockLock.unlock()
                 synchronizer.rate = 0
+                stallCount += 1
                 DebugLog.log("player", "データ切れ: 時計を止めた buffered=\(String(format: "%.2f", buffered))s")
                 state = .buffering
             }

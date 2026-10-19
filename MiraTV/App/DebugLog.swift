@@ -4,7 +4,7 @@ import UIKit
 /// 実機の不具合調査用ログ。1 秒ごとに homeserver の chapterd（POST /log）へまとめて送る。
 /// 設定の「デバッグログを送る」で止められる。パスワード類は扱っていない
 enum DebugLog {
-    static let build = "ci59"
+    static let build = "ci60"
     private static let lock = NSLock()
     private static var buffer: [String] = []
     private static var timer: Timer?
@@ -22,9 +22,22 @@ enum DebugLog {
         return URL(string: s)?.appending(path: "log")
     }
 
+    /// 端末の中だけに残す直近のログ（設定 › 診断で見る。送信をオフにしていても残す）
+    private static var recentLines: [String] = []
+    static var recent: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return recentLines
+    }
+    /// 前回のセッションが正常に終わらなかった（起動時に分かる）
+    private(set) static var previousSessionCrashed = false
+
     static func log(_ cat: String, _ msg: String) {
-        guard enabled else { return }
         let line = "\(fmt.string(from: Date())) [\(cat)] \(msg)"
+        lock.lock()
+        recentLines.append(line)
+        if recentLines.count > 400 { recentLines.removeFirst(100) }
+        lock.unlock()
+        guard enabled else { return }
         lock.lock()
         buffer.append(line)
         if buffer.count > 2000 { buffer.removeFirst(500) }   // 送れない間に膨らみ続けないように
@@ -35,6 +48,7 @@ enum DebugLog {
     static func start() {
         let d = UserDefaults.standard
         if d.bool(forKey: "dbgRunning") {
+            previousSessionCrashed = true
             log("app", "前回のセッションは正常に終わっていません（クラッシュ / メモリ不足による強制終了 / 強制終了操作）。最後の状態: \(d.string(forKey: "dbgLastPhase") ?? "?")")
         }
         d.set(true, forKey: "dbgRunning")

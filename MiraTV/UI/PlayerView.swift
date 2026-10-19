@@ -35,6 +35,11 @@ struct PlayerView: View {
     @State private var tsPausedAt: Date?
     @State private var tsScrub: Double?
     @State private var tsRetried = false
+    /// 追っかけ再生を速めに流してライブに追いつく倍率（nil = 等速）
+    @State private var tsCatchUp: Double?
+    /// 回線が細いときに自動で音声のみへ（データ切れが 1 分に 3 回）
+    @AppStorage("autoAudioOnly") private var autoAudioOnly = true
+    @State private var recentStalls: [Date] = []
     @AppStorage("autoLowDataOnCellular") private var autoLowData = false
     /// 変換配信（EPGStation の ffmpeg）を使うか。既定はオフ＝サーバーに変換の負荷をかけない
     @AppStorage("allowServerTranscode") private var allowTranscode = false
@@ -59,6 +64,8 @@ struct PlayerView: View {
     @State private var relayFailed = false
     @State private var loadingModes = false
     private let ticker = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
+    /// 追っかけ再生中に、見ている時刻の実況を出すための時計
+    private let replayTicker = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
 
     init(service: MirakurunService, services: [MirakurunService], client: MirakurunClient) {
         self.services = services
@@ -245,7 +252,10 @@ struct PlayerView: View {
             TimeshiftClient.stop(svc)          // 局を替えた・閉じた・追っかけを使わなくなった
         }
         .task(id: "\(current.id)-\(commentsOn)-\(livePaused)") {
-            if commentsOn && !livePaused { comments.startLive(jkID: jkID) } else { comments.stopAll() }
+            if commentsOn && !livePaused {
+                comments.startLive(jkID: jkID)
+                comments.setReplaying(tsActive)
+            } else { comments.stopAll() }
         }
         .onChange(of: tsInfo?.id) { old, new in
             // バッファが作り直された（長く止めていた・チューナーを録画に譲った等）→ 前の位置はもう無いのでライブへ
@@ -258,6 +268,20 @@ struct PlayerView: View {
             if engine.isRecordingClip { toggleClip() }
         }
         .onChange(of: engine.pip.isActive) { _, on in if on && engine.isRecordingClip { toggleClip() } }
+        .onChange(of: tsActive) { _, on in comments.setReplaying(on) }
+        .onChange(of: engine.stallCount) { _, _ in noteStall() }
+        .onReceive(replayTicker) { _ in
+            // 追っかけ中の実況: ライブで貯めておいたコメントを、見ている時刻（いま − 遅れ）に合わせて出す
+            guard tsActive, tsInfo != nil, !engine.isPaused else { return }
+            // 追いつき中: ライブの 3 秒手前まで来たら、ライブに戻す
+            if tsCatchUp != nil, liveEdge - tsPosition < 3 {
+                showToast("ライブに追いつきました")
+                goLive()
+                return
+            }
+            guard commentsOn else { return }
+            comments.tickReplay(broadcastTime: Date().timeIntervalSince1970 - max(liveEdge - tsPosition, 0))
+        }
         .onChange(of: program?.id) { _, _ in updateNowPlaying() }
         .onChange(of: current.id) { _, _ in livePaused = false; updateNowPlaying() }
         .onDisappear {
@@ -307,6 +331,9 @@ struct PlayerView: View {
 
     private func startPlayback() {
         engine.audioMode = .both
+        if tsCatchUp != nil || engine.playbackRate != 1 { engine.setSpeed(1) }
+        tsCatchUp = nil
+        recentStalls = []
         tsActive = false
         tsPausedAt = nil
         engine.tracksStreamPosition = false
@@ -498,6 +525,21 @@ struct PlayerView: View {
         }
     }
 
+    /// データ切れが 1 分に 3 回あったら、原画質をやめて音声のみ（streamd があれば約 0.3Mbps）にする
+    private func noteStall() {
+        guard autoAudioOnly, modeID == -1, !tsActive else { recentStalls = []; return }
+        // 軽いストリーム（streamd の音声のみ・ワンセグ）が無いなら、切り替えても通信量は減らないのでやめる
+        let lighter = (!relayFailed && Servers.streamdAudioURL(current) != nil) || (!oneSegFailed && oneSegService != nil)
+        guard lighter else { return }
+        let now = Date()
+        recentStalls = recentStalls.filter { now.timeIntervalSince($0) < 60 } + [now]
+        guard recentStalls.count >= 3 else { return }
+        recentStalls = []
+        DebugLog.log("player", "データ切れが続くので音声のみに切り替え")
+        showToast("回線が細いので音声のみにしました（映像に戻すには再生モードから）")
+        setMode(-2)
+    }
+
     // MARK: - 追っかけ再生
 
     /// 追っかけを使えるか（設定がオン・streamd がある・原画質で見ている）
@@ -553,6 +595,20 @@ struct PlayerView: View {
         updateNowPlaying()
     }
 
+    /// 追いつく: 等速 → 1.5 倍 → 2 倍 → 等速。音程は変えない。ライブに追いついたら自動でライブへ
+    private func cycleCatchUp() {
+        guard tsActive else { return }
+        let next: Double? = switch tsCatchUp {
+        case nil: 1.5
+        case .some(1.5): 2.0
+        default: nil
+        }
+        tsCatchUp = next
+        engine.setSpeed(next ?? 1)
+        if engine.isPaused { tsTogglePause() }
+        showToast(next.map { "×\($0 == 2 ? "2" : "1.5") で追いかけます（ライブに追いついたら戻ります）" } ?? "等速に戻しました")
+    }
+
     private func tsSkip(_ d: Double) {
         let target = tsPosition + d
         if target >= liveEdge - 3 { if tsActive { goLive() }; return }
@@ -584,6 +640,17 @@ struct PlayerView: View {
                             .foregroundStyle(Theme.C.text).frame(width: 40, height: 40)
                     }
                     .buttonStyle(.plain).accessibilityLabel(tsActive && engine.isPaused ? "再生" : "一時停止")
+                    if tsActive {
+                        Button { cycleCatchUp() } label: {
+                            Text(tsCatchUp.map { $0 == 2 ? "×2" : "×1.5" } ?? "追う")
+                                .font(Theme.F.mono(11, .semibold))
+                                .foregroundStyle(tsCatchUp != nil ? Theme.C.onAccent : Theme.C.text)
+                                .padding(.horizontal, 8).frame(height: 26)
+                                .background(tsCatchUp != nil ? Theme.C.accent : Theme.C.surface, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("速めに流してライブに追いつく")
+                    }
                     Slider(value: Binding(get: { tsScrub ?? pos }, set: { tsScrub = $0 }),
                            in: lower...max(edge, lower + 1)) { editing in
                         guard !editing, let v = tsScrub else { return }
@@ -871,7 +938,21 @@ struct PlayerView: View {
                 Text(current.name).font(Theme.F.meta).foregroundStyle(Theme.C.text3).lineLimit(1)
                 Text(program?.title ?? "").font(Theme.F.jp(17, .bold)).foregroundStyle(Theme.C.text).lineLimit(1)
             }
-            Spacer()
+            .layoutPriority(-1)          // 幅はボタンに先に渡し、番組名は残りで省略して出す
+            Spacer(minLength: 8)
+            // ボタンが 7 個ある。入りきるならそのまま右寄せ、入らない機種ではボタンの部分だけ横にスクロール（番組名は省略される）
+            ViewThatFits(in: .horizontal) {
+                topBarButtons
+                ScrollView(.horizontal, showsIndicators: false) { topBarButtons }
+                    .frame(minWidth: 220, maxWidth: 520)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(Theme.C.overlayBar)
+    }
+
+    private var topBarButtons: some View {
+        HStack(spacing: 12) {
             CapsuleTile(label: "字幕", enabled: captionAvailable, active: captionsOn) { toggleCaptions() }
             CapsuleTile(label: audioLabel, enabled: audioSelectable,
                         active: audioSelectable && engine.audioMode != .both) { cycleAudio() }
@@ -882,8 +963,6 @@ struct PlayerView: View {
                         active: engine.isRecordingClip) { toggleClip() }
             PiPCapsule(pip: engine.pip, supported: !isHLS && !isAudioOnly)
         }
-        .padding(.horizontal, 16).padding(.vertical, 8)
-        .background(Theme.C.overlayBar)
     }
 
     private var channelStepper: some View {

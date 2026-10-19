@@ -55,6 +55,8 @@ final class TSPipeline {
     var isFileMode = false
     /// 音声のみ: 映像のパケットを読み捨てて、デコードしない（CPU・電池の節約）
     var audioOnly = false
+    /// 見たいサービス（番組）の ID。録画の中に複数の番組が入っているとき（サブチャンネルなど）、この番組の映像・音声を選ぶ
+    var preferredServiceId: Int?
     private var fileSize: Int64 = 0
     private let seekLock = NSLock()
     private var _pendingSeek: Double?
@@ -75,6 +77,16 @@ final class TSPipeline {
     private var audioIndex: Int32 = -1
     private var captionIndex: Int32 = -1
     private var captionTimeBase = AVRational(num: 1, den: 90000)
+    /// 選んだ番組の program_number（nil = 番組の区別なし）
+    private var programId: Int32?
+    private var knownStreams: UInt32 = 0
+    /// 一度でも選んだ番組に入ったことのあるストリーム（PID が元に戻ったときに読み飛ばしたままにしない）
+    private var everInProgram = Set<Int32>()
+    private var programSignature = 0
+    /// 映像を付け替えた直後: キーフレームが来るまでデコーダーに渡さない（乱れた絵を出さない）
+    private var waitVideoKey = false
+    /// 今の映像・音声が止まって、同じ番組の別のストリームだけが届き始めた時刻（ストリームごと、秒）
+    private var candidateSince: [Int32: Double] = [:]
     private var videoDec: UnsafeMutablePointer<AVCodecContext>?
     private var audioDec: UnsafeMutablePointer<AVCodecContext>?
     private var videoTimeBase = AVRational(num: 1, den: 90000)
@@ -178,6 +190,8 @@ final class TSPipeline {
 
         var opts: OpaquePointer?
         av_dict_set(&opts, "probesize", "2000000", 0)
+        // PMT が変わって PID が替わっても（マルチ編成の始まり・終わり）、同じ役割のストリームは同じ AVStream のまま続ける
+        av_dict_set(&opts, "merge_pmt_versions", "1", 0)
         av_dict_set(&opts, "analyzeduration", "2000000", 0)   // µs
         av_dict_set(&opts, "rw_timeout", "15000000", 0)        // µs, http
         av_dict_set(&opts, "user_agent", "MiraTV/0.1", 0)
@@ -202,8 +216,24 @@ final class TSPipeline {
         r = avformat_find_stream_info(fmt, nil)
         guard r >= 0 else { throw PipelineError("ストリーム解析に失敗", r) }
 
-        videoIndex = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nil, 0)
-        audioIndex = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, videoIndex, nil, 0)
+        // 番組を決める: 録画の局（サービス ID）と同じ番組があればそれ。無ければ FFmpeg が選ぶいちばん良い映像の番組
+        var related: Int32 = -1
+        if let sid = preferredServiceId, let prog = program(id: Int32(sid)), prog.pointee.nb_stream_indexes > 0 {
+            programId = Int32(sid)
+            related = Int32(prog.pointee.stream_index[0])
+        }
+        videoIndex = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, related, nil, 0)
+        if videoIndex < 0, related >= 0 {
+            // 選んだ番組に映像が無い（または見つからない）→ 番組の区別なしで選び直す
+            programId = nil
+            related = -1
+            videoIndex = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nil, 0)
+        }
+        if programId == nil, videoIndex >= 0, fmt.pointee.nb_programs > 1 {
+            programId = programOf(stream: videoIndex)
+        }
+        audioIndex = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, videoIndex >= 0 ? videoIndex : related, nil, 0)
+        if programId != nil { DebugLog.log("player", "番組 \(programId!) を選択（番組数 \(fmt.pointee.nb_programs)）") }
         // 音声のみ（streamd が映像を抜いた TS）は映像が無くてよい
         guard videoIndex >= 0 || (audioOnly && audioIndex >= 0) else { throw PipelineError("映像ストリームが見つかりません") }
         // 字幕は第 1 言語のみ（映像と同じ番組のもの）。無ければ負の値が返る
@@ -228,9 +258,8 @@ final class TSPipeline {
             captionTimeBase = fmt.pointee.streams[Int(captionIndex)]!.pointee.time_base
             info.hasCaption = true
         }
-        for i in 0..<Int(fmt.pointee.nb_streams) where Int32(i) != videoIndex && Int32(i) != audioIndex && Int32(i) != captionIndex {
-            fmt.pointee.streams[i]!.pointee.discard = AVDISCARD_ALL
-        }
+        knownStreams = 0
+        updateDiscard()
         if audioOnly && audioIndex >= 0 && videoIndex >= 0 {
             fmt.pointee.streams[Int(videoIndex)]!.pointee.discard = AVDISCARD_ALL
         }
@@ -261,6 +290,8 @@ final class TSPipeline {
             }
             r = av_read_frame(fmt, pkt)
             if r == kAVErrorEAGAIN { continue }
+            // 途中で PMT が変わった（ストリームが増えた・番組の中身が変わった）→ 読むストリームを決め直す
+            if r >= 0, fmt.pointee.nb_streams != knownStreams || currentProgramSignature() != programSignature { updateDiscard() }
             if r < 0 {
                 if stopRequested { break }
                 if isFileMode && info.isSeekable && r == kAVErrorEOF {
@@ -270,6 +301,22 @@ final class TSPipeline {
                     continue
                 }
                 throw PipelineError(r == kAVErrorEOF ? "ストリームが終了しました" : "受信エラー", r)
+            }
+            if pkt.pointee.stream_index != videoIndex && pkt.pointee.stream_index != audioIndex
+                && pkt.pointee.stream_index != captionIndex {
+                considerSwitch(to: pkt.pointee.stream_index, pkt)
+                av_packet_unref(pkt)
+                continue
+            }
+            if !candidateSince.isEmpty {
+                // 今のストリームがまだ届いている → 切り替え候補を忘れる（副音声など、並んで届く別ストリームでは切り替えない）
+                let t: AVMediaType? = pkt.pointee.stream_index == videoIndex ? AVMEDIA_TYPE_VIDEO
+                    : pkt.pointee.stream_index == audioIndex ? AVMEDIA_TYPE_AUDIO : nil
+                if let t { candidateSince = candidateSince.filter { !isType($0.key, t) } }
+            }
+            if pkt.pointee.stream_index == videoIndex, waitVideoKey {
+                if pkt.pointee.flags & AV_PKT_FLAG_KEY == 0 { av_packet_unref(pkt); continue }
+                waitVideoKey = false
             }
             if pkt.pointee.stream_index == videoIndex, let dec = videoDec {
                 decode(dec, pkt, frame) { self.handleVideoFrame($0) }
@@ -284,6 +331,100 @@ final class TSPipeline {
             }
             av_packet_unref(pkt)
         }
+    }
+
+    // MARK: - 番組とストリームの切り替え（サブチャンネル・マルチ編成）
+
+    private func program(id: Int32) -> UnsafeMutablePointer<AVProgram>? {
+        guard let fmt, let progs = fmt.pointee.programs else { return nil }
+        for i in 0..<Int(fmt.pointee.nb_programs) where progs[i]?.pointee.id == id { return progs[i] }
+        return nil
+    }
+
+    private func programOf(stream idx: Int32) -> Int32? {
+        guard let fmt, let progs = fmt.pointee.programs else { return nil }
+        for i in 0..<Int(fmt.pointee.nb_programs) {
+            guard let p = progs[i] else { continue }
+            for k in 0..<Int(p.pointee.nb_stream_indexes) where Int32(p.pointee.stream_index[k]) == idx { return p.pointee.id }
+        }
+        return nil
+    }
+
+    /// 番組の中身（ストリームの並び）を表す数。変わったら読むストリームを決め直す
+    private func currentProgramSignature() -> Int {
+        guard let pid = programId, let p = program(id: pid) else { return 0 }
+        var h = Int(p.pointee.nb_stream_indexes)
+        for k in 0..<Int(p.pointee.nb_stream_indexes) { h = h &* 31 &+ Int(p.pointee.stream_index[k]) }
+        return h
+    }
+
+    /// 選んだ番組のストリームか（番組の区別が無ければ全部）。一度でも番組に入ったストリームも含める
+    private func inProgram(_ idx: Int32) -> Bool {
+        if everInProgram.contains(idx) { return true }
+        guard let pid = programId else { return true }
+        guard let p = program(id: pid) else { return true }
+        for k in 0..<Int(p.pointee.nb_stream_indexes) where Int32(p.pointee.stream_index[k]) == idx { return true }
+        return false
+    }
+
+    private func isType(_ idx: Int32, _ t: AVMediaType) -> Bool {
+        guard let fmt, idx >= 0, idx < Int32(fmt.pointee.nb_streams) else { return false }
+        return fmt.pointee.streams[Int(idx)]!.pointee.codecpar.pointee.codec_type == t
+    }
+
+    /// 読むストリームを決める。今の映像・音声・字幕に加えて、同じ番組の映像・音声も読む（切り替わりに気付くため。
+    /// デコードはしないので軽い）。ほかの番組・データ放送などは読み飛ばす
+    private func updateDiscard() {
+        guard let fmt else { return }
+        for i in 0..<Int(fmt.pointee.nb_streams) {
+            let idx = Int32(i)
+            let st = fmt.pointee.streams[i]!
+            let t = st.pointee.codecpar.pointee.codec_type
+            let current = idx == videoIndex || idx == audioIndex || idx == captionIndex
+            let member = inProgram(idx)
+            if member && programId != nil { everInProgram.insert(idx) }
+            let watch = member && ((t == AVMEDIA_TYPE_VIDEO && !audioOnly) || t == AVMEDIA_TYPE_AUDIO)
+            st.pointee.discard = current || watch ? AVDISCARD_DEFAULT : AVDISCARD_ALL
+        }
+        if audioOnly && videoIndex >= 0 { fmt.pointee.streams[Int(videoIndex)]!.pointee.discard = AVDISCARD_ALL }
+        knownStreams = fmt.pointee.nb_streams
+        programSignature = currentProgramSignature()
+    }
+
+    /// 今の映像（音声）が届かなくなり、同じ番組の別の映像（音声）だけが 1.5 秒以上届いたら、そちらに付け替える
+    /// （マルチ編成の始まり・終わりで、映像の PID が変わる）
+    private func considerSwitch(to idx: Int32, _ pkt: UnsafeMutablePointer<AVPacket>) {
+        guard let fmt, idx >= 0, idx < Int32(fmt.pointee.nb_streams), inProgram(idx) else { return }
+        let st = fmt.pointee.streams[Int(idx)]!
+        let t = st.pointee.codecpar.pointee.codec_type
+        guard t == AVMEDIA_TYPE_VIDEO || t == AVMEDIA_TYPE_AUDIO else { return }
+        let ts = pkt.pointee.dts != kAVNoPTS ? pkt.pointee.dts : pkt.pointee.pts
+        guard ts != kAVNoPTS else { return }
+        let sec = Double(ts) * st.pointee.time_base.double
+        guard let since = candidateSince[idx] else { candidateSince[idx] = sec; return }
+        guard sec - since > 1.5 || sec < since else { return }
+        candidateSince[idx] = nil
+        if t == AVMEDIA_TYPE_VIDEO && !audioOnly {
+            guard let dec = try? openDecoder(st, video: true) else { return }
+            DebugLog.log("player", "映像を付け替え: ストリーム \(videoIndex) → \(idx)")
+            avcodec_free_context(&videoDec)
+            videoDec = dec
+            videoIndex = idx
+            waitVideoKey = true
+            videoTimeBase = st.pointee.time_base
+            info.videoCodec = String(cString: avcodec_get_name(st.pointee.codecpar.pointee.codec_id))
+        } else if t == AVMEDIA_TYPE_AUDIO {
+            guard let dec = try? openDecoder(st, video: false) else { return }
+            DebugLog.log("player", "音声を付け替え: ストリーム \(audioIndex) → \(idx)")
+            avcodec_free_context(&audioDec)
+            audioDec = dec
+            audioIndex = idx
+            audioTimeBase = st.pointee.time_base
+            info.audioCodec = String(cString: avcodec_get_name(st.pointee.codecpar.pointee.codec_id))
+            info.hasAudio = true
+        } else { return }
+        callbacks.info(info)
+        updateDiscard()
     }
 
     private func openDecoder(_ st: UnsafeMutablePointer<AVStream>, video: Bool) throws -> UnsafeMutablePointer<AVCodecContext> {
@@ -323,6 +464,7 @@ final class TSPipeline {
 
     /// 録画のシーク。目標（PTS 秒）の 0〜約 4 秒手前に着地し、そこからデコードして目標より前のフレームを捨てる
     private func performSeek(to requested: Double, pkt: UnsafeMutablePointer<AVPacket>) {
+        candidateSince = [:]
         guard fmt != nil, info.isSeekable, fileSize > 0 else { callbacks.seeked(requested); return }
         let start = info.startTime
         let dur = max(info.duration, 1)
@@ -372,6 +514,7 @@ final class TSPipeline {
         swr_free(&swr)
         nextAudioPTS = nil
         skipBefore = target
+        updateDiscard()                 // 戻った先の PMT で番組の中身が変わっていることがある
         callbacks.seeked(target)
     }
 

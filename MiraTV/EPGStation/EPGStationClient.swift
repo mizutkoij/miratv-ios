@@ -266,6 +266,28 @@ struct EPGStationClient {
         _ = try await send(req)
     }
 
+    /// 番組を言葉で探す（EPGStation の `POST /api/schedules/search`。ルールの検索と同じ条件）。
+    /// bands: 空なら全部の放送波。withDescription: 番組名に加えて概要・詳細も探す
+    func searchPrograms(keyword: String, bands: [String], withDescription: Bool, limit: Int = 300) async throws -> [ESProgram] {
+        let all = bands.isEmpty
+        let option: [String: Any] = [
+            "keyword": keyword, "name": true, "description": withDescription, "extended": withDescription,
+            "keyCS": false, "keyRegExp": false,
+            "GR": all || bands.contains("GR"), "BS": all || bands.contains("BS"),
+            "CS": all || bands.contains("CS"), "SKY": all || bands.contains("SKY"),
+            "isFree": false,
+        ]
+        let body: [String: Any] = ["option": option, "isHalfWidth": true, "limit": limit]
+        var req = URLRequest(url: url("api/schedules/search"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        req.timeoutInterval = 30
+        let data = try await send(req)
+        let list = try JSONDecoder().decode([LossyDecodable<ESProgram>].self, from: data).compactMap(\.value)
+        return list.sorted { $0.startAt < $1.startAt }
+    }
+
     func deleteRule(id: Int) async throws {
         var req = URLRequest(url: url("api/rules/\(id)"))
         req.httpMethod = "DELETE"

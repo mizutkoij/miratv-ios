@@ -83,3 +83,8 @@ targets:
         CFBundleDisplayName: MiraTV
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        # ウィジェットも EPGStation（http・Tailscale）を読む
+        NSAppTransportSecurity:
+          NSExceptionDomains:
+            "192.0.2.10":
+              NSExceptionAllowsInsecureHTTPLoads: true

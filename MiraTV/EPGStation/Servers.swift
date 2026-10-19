@@ -1,4 +1,5 @@
 import Foundation
+import WidgetKit
 
 /// 設定画面で入力された接続先（UserDefaults）から、そのつどクライアントを作る
 enum Servers {
@@ -75,7 +76,12 @@ final class ReserveStore: ObservableObject {
 
     func refresh() async {
         guard let es = Servers.epgstation else { error = "EPGStation の URL が設定されていません"; return }
-        do { reserves = try await es.reserves(); error = nil }
+        do {
+            let new = try await es.reserves()
+            if new != reserves { WidgetCenter.shared.reloadAllTimelines() }   // ウィジェットの「次の録画」を更新
+            reserves = new
+            error = nil
+        }
         catch { self.error = describeError(error) }
     }
 

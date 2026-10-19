@@ -6,6 +6,7 @@ import WidgetKit
 struct MiraTVWidgetsBundle: WidgetBundle {
     var body: some Widget {
         NowPlayingLiveActivity()
+        GuideWidget()
     }
 }
 

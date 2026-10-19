@@ -21,11 +21,13 @@ struct SettingsView: View {
     @AppStorage("timeshiftEnabled") private var timeshiftEnabled = true
     @AppStorage("liveActivity") private var liveActivity = true
     @AppStorage("surround51") private var surround51 = true
+    @AppStorage("autoAudioOnly") private var autoAudioOnly = true
 
     @EnvironmentObject private var epg: EPGStore
 
     @State private var results: [String: (ok: Bool, text: String)] = [:]
     @State private var testing = false
+    @State private var showDiagnostics = false
 
     var body: some View {
         ZStack {
@@ -68,6 +70,16 @@ struct SettingsView: View {
                     .buttonStyle(.plain)
                     .disabled(testing)
 
+                    Button { showDiagnostics = true } label: {
+                        Label("診断（ビルド・接続・最近のエラー）", systemImage: "stethoscope")
+                            .font(Theme.F.jp(14, .medium)).foregroundStyle(Theme.C.text)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .background(Theme.C.surface, in: RoundedRectangle(cornerRadius: Theme.R.button))
+                            .overlay(RoundedRectangle(cornerRadius: Theme.R.button).stroke(Theme.C.border))
+                    }
+                    .buttonStyle(.plain)
+                    .sheet(isPresented: $showDiagnostics) { DiagnosticsView() }
+
                     VStack(alignment: .leading, spacing: 6) {
                         Toggle("サーバーで変換する再生モードを使う", isOn: $allowTranscode)
                             .tint(Theme.C.accent)
@@ -89,6 +101,14 @@ struct SettingsView: View {
                             .tint(Theme.C.accent)
                             .font(Theme.F.jp(14)).foregroundStyle(Theme.C.text)
                         Text("原画質で見ている間、streamd が直近の放送（既定 30 分）を homeserver のディスクに貯めます。エンコードはしないので CPU はほぼ使いません。チューナーは見ている局の 1 つだけ。閉じて 3 分たつと止まって消えます。")
+                            .font(Theme.F.caption).foregroundStyle(Theme.C.text4)
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("途切れが続いたら音声のみにする", isOn: $autoAudioOnly)
+                            .tint(Theme.C.accent)
+                            .font(Theme.F.jp(14)).foregroundStyle(Theme.C.text)
+                        Text("ライブを原画質で見ていて、データ切れが 1 分に 3 回あったら音声のみ（streamd があれば約 0.3Mbps）に切り替えます。映像に戻すには再生モードから。")
                             .font(Theme.F.caption).foregroundStyle(Theme.C.text4)
                     }
 

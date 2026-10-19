@@ -159,6 +159,8 @@ struct RecordedPlayerView: View {
                                 onPause: { engine.setPaused(true); updateNowPlaying() },
                                 onSkip: { engine.seek(by: $0); updateNowPlaying() })
             engine.durationHint = recorded.durationSeconds    // libavformat が長さを出せなかったときの代わり
+            // EPGStation の channelId = networkId * 100000 + serviceId。サブチャンネルの録画で、その番組の映像・音声を選ぶ
+            engine.preferredServiceId = recorded.channelId.map { $0 % 100_000 }
             // 元の TS は EPGStation（Node）を通さず、homeserver のファイルを直接読む。
             // 使えるかを先に HEAD で確かめると毎回最大 4 秒待つので、使える前提でいきなり開き、
             // 再生に入る前に失敗したときだけ EPGStation に切り替える

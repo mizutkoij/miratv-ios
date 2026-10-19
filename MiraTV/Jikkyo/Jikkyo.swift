@@ -253,6 +253,51 @@ final class CommentController: ObservableObject {
     private var lastClock: Double?
     private var live: JikkyoLiveSession?
     private var loadTask: Task<Void, Never>?
+    /// ライブで届いたコメント（直近 40 分）。追っかけ再生のとき、見ている時刻に合わせて出し直すため
+    private var history: [JikkyoComment] = []
+    /// 追っかけ再生中: ライブのコメントは画面に流さず history に貯め、tick で見ている時刻の分を出す
+    private var replaying = false
+
+    private func receiveLive(_ c: JikkyoComment) {
+        history.append(c)
+        // 45 分を超えたら 40 分まで減らす（毎回は減らさない）。減らした分だけ再生位置もずらす
+        if history.count > 30_000 || (history.first.map { c.time - $0.time > 45 * 60 } ?? false) {
+            let cut = c.time - 40 * 60
+            var k = history.firstIndex { $0.time >= cut } ?? history.count
+            k = max(k, history.count - 25_000)
+            if k > 0 {
+                history.removeFirst(k)
+                index = max(0, index - k)
+            }
+        }
+        if !replaying { sink?(c) }
+    }
+
+    /// 追っかけ再生に入った / ライブに戻った
+    func setReplaying(_ on: Bool) {
+        guard on != replaying else { return }
+        replaying = on
+        lastClock = nil
+        clear?()
+    }
+
+    /// 追っかけ再生中に呼ぶ: いま見ている放送時刻（UNIX 秒）。ライブで貯めたコメントから、その時刻の分を出す
+    func tickReplay(broadcastTime t: Double) {
+        guard replaying, !history.isEmpty else { return }
+        if let last = lastClock, t < last - 0.5 || t > last + 2 {
+            index = history.firstIndex { $0.time >= t } ?? history.count
+            clear?()
+        } else if lastClock == nil {
+            index = history.firstIndex { $0.time >= t - 0.5 } ?? history.count
+        }
+        lastClock = t
+        var shown = 0
+        while index < history.count, history[index].time <= t {
+            if shown < 20 { sink?(history[index]) }
+            shown += 1
+            index += 1
+        }
+    }
 
     // 録画: 放送時刻 [from, to] の過去ログを読む
     func loadPast(jkID: String?, from: Date, to: Date) {
@@ -297,8 +342,9 @@ final class CommentController: ObservableObject {
         past = []
         stopLive()
         guard let jkID else { status = "この局は実況がありません"; return }
+        history = []
         let s = JikkyoLiveSession(jkID: jkID,
-                                  onComment: { [weak self] c in self?.sink?(c) },
+                                  onComment: { [weak self] c in self?.receiveLive(c) },
                                   onStatus: { [weak self] st in self?.status = st })
         live = s
         s.start()
@@ -313,6 +359,8 @@ final class CommentController: ObservableObject {
         stopLive()
         loadTask?.cancel()
         past = []
+        history = []
+        replaying = false
         clear?()
         status = ""
     }

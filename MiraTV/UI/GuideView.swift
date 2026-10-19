@@ -14,6 +14,7 @@ struct GuideView: View {
     @EnvironmentObject private var reserves: ReserveStore
 
     @State private var band = "GR"
+    @State private var showSearch = false
     @State private var dayOffset = 0
     @State private var columns: [ESSchedule] = []
     /// 並び順: "remote" = リモコン番号順（既定）、"affiliation" = 系列順（関東の並び: NHK → 独立 → 日テレ → テレ朝 → TBS → テレ東 → フジ）
@@ -81,23 +82,27 @@ struct GuideView: View {
             VStack(alignment: .leading, spacing: 0) {
                 ScreenHeader(title: "番組表",
                              status: errorText.map { StatusLine(text: $0, color: Theme.C.rec) }) {
-                    Menu {
-                        Picker("放送波", selection: $band) {
-                            ForEach(Self.bands, id: \.self) { Text(bandLabel($0)).tag($0) }
+                    HStack(spacing: 8) {
+                        CircleButton(systemName: "magnifyingglass") { showSearch = true }
+                            .accessibilityLabel("番組を探す")
+                        Menu {
+                            Picker("放送波", selection: $band) {
+                                ForEach(Self.bands, id: \.self) { Text(bandLabel($0)).tag($0) }
+                            }
+                            Picker("並び順", selection: $guideOrder) {
+                                Text("リモコン番号順").tag("remote")
+                                Text("系列順（NHK・独立・日テレ・朝日・TBS・テレ東・フジ）").tag("affiliation")
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(bandLabel(band)).font(Theme.F.jp(14, .bold))
+                                Image(systemName: "chevron.down").font(.system(size: 10, weight: .bold))
+                            }
+                            .foregroundStyle(Theme.C.text)
+                            .padding(.horizontal, 14).frame(height: 40)
+                            .background(Theme.C.surface, in: Capsule())
+                            .overlay(Capsule().stroke(Theme.C.border))
                         }
-                        Picker("並び順", selection: $guideOrder) {
-                            Text("リモコン番号順").tag("remote")
-                            Text("系列順（NHK・独立・日テレ・朝日・TBS・テレ東・フジ）").tag("affiliation")
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(bandLabel(band)).font(Theme.F.jp(14, .bold))
-                            Image(systemName: "chevron.down").font(.system(size: 10, weight: .bold))
-                        }
-                        .foregroundStyle(Theme.C.text)
-                        .padding(.horizontal, 14).frame(height: 40)
-                        .background(Theme.C.surface, in: Capsule())
-                        .overlay(Capsule().stroke(Theme.C.border))
                     }
                 }
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -125,6 +130,7 @@ struct GuideView: View {
                 grid
             }
         }
+        .sheet(isPresented: $showSearch) { ProgramSearchSheet().environmentObject(reserves) }
         .task(id: "\(band)-\(dayOffset)-\(epgURL)") {
             await load()
             await reserves.refresh()
