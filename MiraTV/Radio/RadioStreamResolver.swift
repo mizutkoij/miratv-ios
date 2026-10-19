@@ -1,8 +1,8 @@
 import Foundation
 
 /// 局 → 実際に再生する URL とエンジンの対応表。
-/// iPhone 標準 (AVPlayer) で鳴るのは radiko / NHK / ListenRadio / manual の 219 局。
-/// fmplapla (Ogg) と JCBA (WebSocket + Ogg/Opus) は FFmpeg エンジン側の対応待ち。
+/// すべて iPhone 標準 (AVPlayer) で鳴らす。fmplapla (Ogg) と JCBA (WebSocket + Ogg/Opus) は、
+/// radio-web (VPS2) の live_bridge.py が MP3 に変換して流す（/live/fmplapla/<slug>.mp3, /live/jcba/<slug>.mp3）。
 enum RadioEngine {
     /// AVPlayer に URL を渡すだけ（HLS / Icecast / audio/mp4）
     case avPlayer(URL)
@@ -18,9 +18,10 @@ struct RadioStreamResolver {
     /// 一覧で「再生可」フィルタに使う。ネットワーク不要の静的判定
     static func isNativelyPlayable(_ s: RadioStation) -> Bool {
         switch s.source {
-        case .radiko, .nhk, .listenradio: true
+        case .radiko, .nhk, .listenradio, .fmplapla: true
+        case .jcba: s.jcbaSlug != nil
         case .manual: s.streamUrl != nil
-        case .fmplapla, .jcba, .unknown: false
+        case .unknown: false
         }
     }
 
@@ -49,9 +50,12 @@ struct RadioStreamResolver {
             }
             return .avPlayer(u)
         case .fmplapla:
-            return .ffmpeg(try await client.fmplaplaResolve(station: s.fmplaplaStation ?? s.id))
+            // 実 URL（トークン付き Ogg）はサーバーが取り直して MP3 に変換する
+            guard let slug = s.fmplaplaStation else { throw RadioWebError.unsupported("FMぷらぷらの局 ID がありません") }
+            return .avPlayer(client.url("live/fmplapla/\(slug).mp3"))
         case .jcba:
-            return .unsupported("JCBA は WebSocket 配信のため未対応です")
+            guard let slug = s.jcbaSlug else { throw RadioWebError.unsupported("JCBA の局 ID がありません") }
+            return .avPlayer(client.url("live/jcba/\(slug).mp3"))
         case .unknown:
             return .unsupported("未知の配信元です")
         }
