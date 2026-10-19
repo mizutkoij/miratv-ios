@@ -13,6 +13,9 @@ enum WatchPositions {
     /// 残りがこれ未満なら「見終わった」扱いで消す
     static let finishedRemaining: Double = 90
 
+    /// 一覧用: 1 回の読み出しで全部（行ごとに UserDefaults を読み直すと数百行で重くなる）
+    static var snapshot: [String: Double] { all }
+
     private static var all: [String: Double] {
         get { UserDefaults.standard.dictionary(forKey: key) as? [String: Double] ?? [:] }
         set { UserDefaults.standard.set(newValue, forKey: key) }

@@ -244,6 +244,11 @@ final class UsenetCatalog: ObservableObject {
     private static let extKey = "nzbMainExt.v1"
 
     /// 本体ファイルの拡張子（ts / mp4 / 7z …）。まだ調べていなければ nil
+    /// 一覧用: 1 回の読み出しで全部（行ごとに読み直すと重い）
+    func extSnapshot() -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: Self.extKey) as? [String: String] ?? [:]
+    }
+
     func mainExt(_ id: String) -> String? {
         (UserDefaults.standard.dictionary(forKey: Self.extKey) as? [String: String])?[id]
     }

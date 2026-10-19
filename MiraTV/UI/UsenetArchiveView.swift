@@ -14,6 +14,9 @@ struct UsenetArchiveView: View {
     @State private var onlyResume = false
     @State private var results: [UsenetEntry] = []
     @State private var shownLimit = 100
+    // 行ごとに UserDefaults を読むと押す・スクロールのたびに重いので、まとめて 1 回だけ読む
+    @State private var exts: [String: String] = [:]
+    @State private var positions: [String: Double] = [:]
     @FocusState private var searchFocused: Bool
 
     private static let pageSize = 100
@@ -45,7 +48,13 @@ struct UsenetArchiveView: View {
             let stale = catalog.lastSync.map { Date().timeIntervalSince($0) > 15 * 60 } ?? true
             if configured && stale { await catalog.refresh() }
         }
-        .task(id: filterKey) { await applyFilter() }
+        .task(id: filterKey) { reloadSnapshots(); await applyFilter() }
+        .onAppear { reloadSnapshots() }
+    }
+
+    private func reloadSnapshots() {
+        exts = catalog.extSnapshot()
+        positions = WatchPositions.snapshot
     }
 
     // MARK: - 探す
@@ -109,7 +118,7 @@ struct UsenetArchiveView: View {
         }.value
         if Task.isCancelled { return }
         if onlyResume {
-            let keys = WatchPositions.savedKeys
+            let keys = Set(positions.keys)
             r = r.filter { keys.contains($0.watchKey) }
         }
         results = r
@@ -155,9 +164,9 @@ struct UsenetArchiveView: View {
     }
 
     private func row(_ e: UsenetEntry) -> some View {
-        let ext = catalog.mainExt(e.id)
+        let ext = exts[e.id]
         let locked = ext == "7z" || ext == "rar" || ext == "zip"
-        let resume = WatchPositions.position(key: e.watchKey)
+        let resume = positions[e.watchKey]
         return HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(e.airDate.map(Self.dayText) ?? "日時不明").font(Theme.F.jp(11)).foregroundStyle(Theme.C.text4)
