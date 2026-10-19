@@ -52,10 +52,11 @@ final class PlaybackSession: ObservableObject {
         minimized = false
     }
 
-    func playUsenet(_ entry: UsenetEntry, client: NzbDlClient) {
+    /// keepMinimized: 次の回へ自動で進むとき、たたんだままなら、たたんだままにする
+    func playUsenet(_ entry: UsenetEntry, client: NzbDlClient, keepMinimized: Bool = false) {
         if case .usenet(let e, _) = item, e.id == entry.id { expand(); return }
         item = .usenet(entry, client)
-        minimized = false
+        if !keepMinimized { minimized = false }
     }
 
     func minimize() {

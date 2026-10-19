@@ -3,7 +3,13 @@ import SwiftUI
 /// 録画タブの「アーカイブ」: Usenet に上げたテレビの録画（VPS1 の nzb-dl）を探して再生する。
 /// 一覧は端末に保存したものをすぐ出し、裏で新しい分だけ取り足す（UsenetCatalog）。
 struct UsenetArchiveView: View {
+    /// 見せ方: 新しい放送順の一覧 / 日付を選んで番組表 / 同じ番組の回をまとめたシリーズ
+    enum Mode: String, CaseIterable {
+        case list = "新着", guide = "番組表", series = "シリーズ"
+    }
+
     @ObservedObject private var catalog = UsenetCatalog.shared
+    @AppStorage("nzbArchiveMode") private var mode: Mode = .list
     @EnvironmentObject private var session: PlaybackSession
     // 設定が変わったら作り直す（URL・キーを入れた直後に一覧を取りにいく）
     @AppStorage("nzbdlURL") private var nzbdlURL = Defaults.nzbdlURL
@@ -17,6 +23,7 @@ struct UsenetArchiveView: View {
     // 行ごとに UserDefaults を読むと押す・スクロールのたびに重いので、まとめて 1 回だけ読む
     @State private var exts: [String: String] = [:]
     @State private var positions: [String: Double] = [:]
+    @State private var watched: Set<String> = []
     @FocusState private var searchFocused: Bool
 
     private static let pageSize = 100
@@ -30,17 +37,22 @@ struct UsenetArchiveView: View {
     var body: some View {
         VStack(spacing: 0) {
             if configured || !catalog.entries.isEmpty {
-                searchBar.padding(.horizontal, 12).padding(.bottom, 8)
+                modeRow.padding(.horizontal, 12).padding(.bottom, 8)
+                if mode != .guide {
+                    searchBar.padding(.horizontal, 12).padding(.bottom, 8)
+                }
                 filterRow.padding(.horizontal, 12).padding(.bottom, 8)
             }
-            ScrollView {
-                LazyVStack(spacing: 6) {
-                    content
-                }
-                .padding(.horizontal, 12).padding(.bottom, 16)
+            switch mode {
+            case .list where configured || !catalog.entries.isEmpty:
+                listView
+            case .guide where !catalog.entries.isEmpty:
+                UsenetGuideView(station: station, positions: positions, watched: watched) { play($0) }
+            case .series where !catalog.entries.isEmpty:
+                UsenetSeriesView(query: query, station: station, positions: positions, watched: watched) { play($0) }
+            default:
+                listView        // 未設定・一覧がまだ無いときの案内も一覧の場所に出す
             }
-            .scrollDismissesKeyboard(.immediately)
-            .refreshable { await catalog.refresh() }
         }
         .task(id: "\(nzbdlURL)|\(nzbdlKey)") {
             await catalog.loadIfNeeded()
@@ -50,11 +62,37 @@ struct UsenetArchiveView: View {
         }
         .task(id: filterKey) { reloadSnapshots(); await applyFilter() }
         .onAppear { reloadSnapshots() }
+        // 再生画面を閉じた・次の回へ進んだ後に、「続き」「見た」の印を取り直す
+        .onChange(of: session.item?.id) { _, _ in reloadSnapshots() }
     }
 
     private func reloadSnapshots() {
         exts = catalog.extSnapshot()
         positions = WatchPositions.snapshot
+        watched = UsenetWatched.snapshot
+    }
+
+    private var listView: some View {
+        ScrollView {
+            LazyVStack(spacing: 6) {
+                content
+            }
+            .padding(.horizontal, 12).padding(.bottom, 16)
+        }
+        .scrollDismissesKeyboard(.immediately)
+        .refreshable { await catalog.refresh() }
+    }
+
+    private var modeRow: some View {
+        HStack(spacing: 6) {
+            ForEach(Mode.allCases, id: \.self) { m in
+                ChipView(label: m.rawValue, selected: mode == m) {
+                    searchFocused = false
+                    mode = m
+                }
+            }
+            Spacer(minLength: 0)
+        }
     }
 
     // MARK: - 探す
@@ -99,9 +137,13 @@ struct UsenetArchiveView: View {
                 .background(station == nil ? Theme.C.surface : Theme.C.accent, in: Capsule())
                 .overlay(Capsule().stroke(station == nil ? Theme.C.border : Color.clear))
             }
-            ChipView(label: "続きから", selected: onlyResume) { onlyResume.toggle() }
+            if mode == .list {
+                ChipView(label: "続きから", selected: onlyResume) { onlyResume.toggle() }
+            }
             Spacer(minLength: 4)
-            Text("\(results.count) 件").font(Theme.F.mono(12, .medium)).foregroundStyle(Theme.C.text4)
+            if mode == .list {
+                Text("\(results.count) 件").font(Theme.F.mono(12, .medium)).foregroundStyle(Theme.C.text4)
+            }
         }
     }
 
@@ -188,6 +230,8 @@ struct UsenetArchiveView: View {
                     }
                     if let resume {
                         Text("続き \(Self.clock(resume))").font(Theme.F.jp(11, .bold)).foregroundStyle(Theme.C.accent)
+                    } else if watched.contains(e.id) {
+                        Label("見た", systemImage: "checkmark").font(Theme.F.jp(11, .medium)).foregroundStyle(Theme.C.text4)
                     }
                 }
             }
