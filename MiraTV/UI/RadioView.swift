@@ -160,12 +160,12 @@ struct RadioStationView: View {
     @State private var showPicker = false
     @State private var picked = Date()
 
-    /// 再生できる nzb アーカイブの先頭（実機ではなくサーバーで再生要求して確認: 7/9 以前は nzb ファイルが無く 502。
-    /// 一覧（DB）には 5/13 から載るが、Discord の nzb バックアップは 2026-07-07 が最古で、旧 VPS1 の消失(9/5)で原本が無い）
+    /// 再生できる nzb アーカイブの先頭（サーバーで再生要求して確認: 一覧(DB)は 5/13 から載る。
+    /// 5/13〜7/12 の nzb は Discord の nzb バックアップに残っていたため 2026-10-19 に VPS1 へ再取得し、TBS で 5/14〜7/9 の再生を確認済み）
     private var archiveStart: Date {
         // NHK は専用の取り込みが始まった 2026-09-08 ごろから（それ以前は数日に 1 件だけ）
         var c = DateComponents(); c.year = 2026
-        if station.nhkArchiveKey != nil { c.month = 9; c.day = 8 } else { c.month = 7; c.day = 13 }
+        if station.nhkArchiveKey != nil { c.month = 9; c.day = 8 } else { c.month = 5; c.day = 13 }
         return Calendar.current.date(from: c) ?? Date.distantPast
     }
 
@@ -229,8 +229,8 @@ struct RadioStationView: View {
                 DatePicker("日付", selection: $picked, in: archiveStart...Date(), displayedComponents: .date)
                     .datePickerStyle(.graphical)
                     .environment(\.locale, Locale(identifier: "ja_JP"))
-                Text(station.nhkArchiveKey != nil ? "NHK のアーカイブ（全国放送分）は 2026年9月8日 以降です。直近 7 日は radiko の聴き逃しです"
-                                            : "再生できるアーカイブは 2026年7月13日 以降です（それ以前は一覧に出ても、元の nzb が失われていて再生できません）")
+                Text(station.nhkArchiveKey != nil ? "NHK のアーカイブ（全国放送分）は 2026年9月8日 以降です（radiko の聴き逃しは NHK では使えません）"
+                                            : "再生できるアーカイブは 2026年5月13日 以降です")
                     .font(Theme.F.caption).foregroundStyle(Theme.C.text3)
                     .padding(.horizontal, 16)
                 Spacer()
@@ -300,7 +300,7 @@ struct RadioStationView: View {
     /// この番組を radiko の聴き逃しで聴けるなら、その開始・終了。放送日は 05:00 区切り（0〜4 時台は翌暦日）。
     /// 終了済みで、開始が 7 日以内のものだけ
     private func pastEntry(_ item: RadioScheduleItem) -> RadioPlayer.PastEntry? {
-        guard station.source == .radiko, let len = item.lengthSeconds else { return nil }
+        guard station.source == .radiko, !station.isRadikoNHK, let len = item.lengthSeconds else { return nil }
         let p = item.ft.raw.split(separator: ":")
         guard p.count == 2, let h = Int(p[0]), let m = Int(p[1]) else { return nil }
         var c = Self.jst.dateComponents([.year, .month, .day], from: day)
@@ -351,12 +351,12 @@ struct RadioStationView: View {
     private func load() async {
         guard hasSchedule else { return }
         if station.source == .nhk { await loadNHK(); return }
-        // radiko の NHK は、聴き逃しの窓（7 日）より前は NHK 専用の nzb アーカイブから引く
-        if station.isRadikoNHK, day <= Calendar.current.startOfDay(for: Date()).addingTimeInterval(-7 * 86400) {
-            await loadNHK(); return
-        }
         // 放送日は 05:00 区切り。0〜5 時の「昨日」はまだ放送中なので取り直す
         let broadcastToday = Calendar.current.startOfDay(for: Date().addingTimeInterval(-5 * 3600))
+        // radiko の NHK は radiko の聴き逃しが使えない（radiko 側が禁止）。過去の日は常に NHK 専用の nzb アーカイブから引く
+        if station.isRadikoNHK, day < broadcastToday {
+            await loadNHK(); return
+        }
         let isPast = day < broadcastToday
         let key = RadioWebClient.scheduleCacheKey(source: station.source, station: station.id, date: day)
         if let saved = client.cachedSchedule(source: station.source, station: station.id, date: day) {
@@ -369,7 +369,18 @@ struct RadioStationView: View {
         }
         loading = true; defer { loading = false }
         do {
-            items = try await client.schedule(source: station.source, station: station.id, date: day).items
+            var fetched = try await client.schedule(source: station.source, station: station.id, date: day).items
+            // radiko の NHK の「今日」: 番組表（radiko）に、録音済みの回（NHK 専用アーカイブ）を開始時刻で突き合わせて nzb を付ける
+            if station.isRadikoNHK, let key = station.nhkArchiveKey,
+               let hits = try? await client.archiveSearch(station: key, q: nil, date: day) {
+                var byStart: [String: RadioArchiveHit] = [:]
+                for h in hits { if let o = h.onair, o.count >= 16 { byStart[String(o.dropFirst(11).prefix(5))] = h } }
+                fetched = fetched.map { it in
+                    guard !it.isArchived, let h = byStart[it.ft.raw] else { return it }
+                    return RadioScheduleItem(ft: it.ft, to: it.to, title: it.title, pfm: it.pfm, thumbnail: it.thumbnail, nzb: h.nzb)
+                }
+            }
+            items = fetched
             errorText = nil
         } catch {
             if items.isEmpty { errorText = describeError(error) }
