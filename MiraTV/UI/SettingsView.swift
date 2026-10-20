@@ -3,6 +3,7 @@ import SwiftUI
 /// 設定（DESIGN.md では未デザイン）: 接続先の URL、接続テスト、一覧の表示設定
 struct SettingsView: View {
     @AppStorage("mirakurunURL") private var mirakurunURL = Defaults.mirakurunURL
+    @AppStorage("mirakurun2URL") private var mirakurun2URL = Defaults.mirakurun2URL
     @AppStorage("epgstationURL") private var epgstationURL = Defaults.epgstationURL
     @AppStorage("radioWebURL") private var radioURL = Defaults.radioWebURL
     @AppStorage("radioSearchURL") private var radioSearchURL = Defaults.radioSearchURL
@@ -38,6 +39,8 @@ struct SettingsView: View {
                         .padding(.horizontal, -20)
 
                     field("Mirakurun（テレビの映像・局一覧）", $mirakurunURL, Defaults.mirakurunURL, key: "mirakurun")
+                    field("Mirakurun 2（もう 1 台）", $mirakurun2URL, Defaults.mirakurun2URL, key: "mirakurun2",
+                          hint: "チャンネル画面の上のスイッチで切り替えます。空にするとスイッチは出ません。中継（音声のみ・追っかけ）とデータ放送は 1 台目だけです。")
                     field("EPGStation（番組表・録画・変換配信）", $epgstationURL, Defaults.epgstationURL, key: "epgstation")
                     field("radio-web（ラジオ）", $radioURL, Defaults.radioWebURL, key: "radio")
                     field("ラジオ検索（過去の番組を探す）", $radioSearchURL, Defaults.radioSearchURL, key: "radiosearch",

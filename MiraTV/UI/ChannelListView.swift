@@ -2,7 +2,13 @@ import SwiftUI
 
 /// DESIGN.md「チャンネル一覧（Main）」の実装
 struct ChannelListView: View {
-    @AppStorage("mirakurunURL") private var serverURL = Defaults.mirakurunURL
+    @AppStorage("mirakurunURL") private var url1 = Defaults.mirakurunURL
+    @AppStorage("mirakurun2URL") private var url2 = Defaults.mirakurun2URL
+    @AppStorage("mirakurunActive") private var activeServer = 0
+    private var hasSecond: Bool { !url2.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var onSecond: Bool { hasSecond && activeServer == 1 }
+    /// 見ているほうの Mirakurun。切り替えると局一覧を取り直す
+    private var serverURL: String { onSecond ? url2 : url1 }
     @EnvironmentObject private var epg: EPGStore
     @EnvironmentObject private var session: PlaybackSession
 
@@ -20,9 +26,26 @@ struct ChannelListView: View {
 
     private var client: MirakurunClient? { MirakurunClient(serverURL) }
 
+    /// 2 台目の Mirakurun は、放送波の枠（GR/BS/CS）に配信・海外の局を割り当てているだけなので、局名で種類を分ける。
+    /// 例: 地上波枠 = ABEMA、BS 枠 = MLB・各種配信、CS 枠 = 韓国の放送・DAZN
+    private static let secondBands = ["ABEMA", "MLB", "配信", "DAZN", "韓国", "他"]
+
+    private func secondBandOf(_ s: MirakurunService) -> String {
+        let n = s.name
+        if n.hasPrefix("ABEMA") || s.channel?.type == "GR" { return "ABEMA" }
+        if n.hasPrefix("MLB") { return "MLB" }
+        if n.hasPrefix("DAZN") { return "DAZN" }
+        if n.hasPrefix("QAM/") || n.hasPrefix("{") { return "他" }
+        if s.channel?.type == "CS" { return "韓国" }
+        return "配信"   // BS 枠: FOD / U-NEXT / Hulu / J-Sports / EasySports / 虎テレ / GIANTS TV / NHK World など
+    }
+
+    private var bands: [String] { onSecond ? Self.secondBands : Self.bands }
+
     /// SKY は CS として扱う
     private func bandOf(_ s: MirakurunService) -> String {
-        switch s.channel?.type {
+        if onSecond { return secondBandOf(s) }
+        return switch s.channel?.type {
         case "GR": "GR"
         case "BS": "BS"
         case "CS", "SKY": "CS"
@@ -33,7 +56,8 @@ struct ChannelListView: View {
     private func items(in band: String) -> [MirakurunService] {
         let showAll = showInactive
         return services
-            .filter { $0.isTV && bandOf($0) == band && (showAll || epg.isActive($0)) }
+            // EPGStation の概要は 1 台目の局だけ。2 台目は EPGStation に載らない局が多いので全部出す
+            .filter { $0.isTV && bandOf($0) == band && (showAll || onSecond || epg.isActive($0)) }
             .sorted { ($0.remoteControlKeyId ?? 99, $0.serviceId) < ($1.remoteControlKeyId ?? 99, $1.serviceId) }
     }
 
@@ -68,7 +92,12 @@ struct ChannelListView: View {
                                                 color: errorText == nil ? Theme.C.live : Theme.C.rec)) {
                     CircleButton(systemName: "arrow.clockwise") { Task { await load(manual: true) } }
                 }
-                SegmentedPills(options: Self.bands, label: label, selection: $band)
+                if hasSecond {
+                    SegmentedPills(options: [0, 1], label: { $0 == 0 ? "Mirakurun 1" : "Mirakurun 2" }, selection: $activeServer)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 6)
+                }
+                SegmentedPills(options: bands, label: label, selection: $band)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 10)
 
@@ -86,6 +115,7 @@ struct ChannelListView: View {
             }
         }
         .task(id: serverURL) { await load() }
+        .onChange(of: onSecond) { _, _ in if !bands.contains(band) { band = bands[0] } }
         .task(id: epgURL) { await epg.refreshOverview(es: Servers.epgstation, force: true) }
         .onReceive(ticker) { t in
             now = t
@@ -123,9 +153,9 @@ struct ChannelListView: View {
             .rowCard()
         }
         .buttonStyle(.plain)
-        .task(id: epg.overviewFailed) {
-            // EPGStation の概要が取れなかったときだけ、局ごとに Mirakurun から取る（重いのでフォールバック）
-            if epg.overviewFailed, let client { await epg.loadViaMirakurun(s, client: client) }
+        .task(id: epg.overviewFailed || onSecond) {
+            // EPGStation の概要が取れなかったとき、または 2 台目のときだけ、局ごとに Mirakurun から取る（重いので表示中の行だけ）
+            if epg.overviewFailed || onSecond, let client { await epg.loadViaMirakurun(s, client: client) }
         }
     }
 

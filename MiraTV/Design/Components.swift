@@ -4,6 +4,8 @@ import SwiftUI
 
 enum Defaults {
     static let mirakurunURL = "http://192.0.2.10:36192"
+    /// もう 1 台の Mirakurun（ABEMA の仮想チューナー + 地上波 97・BS 460・CS 375 局）。チャンネル画面で切り替える
+    static let mirakurun2URL = "http://192.0.2.10:36196"
     static let radioWebURL = "http://192.0.2.20:8090"
     /// VPS2 の radio-search（server/radio-search。radiko.db の約 50 万件の過去番組を全文検索）
     static let radioSearchURL = "http://192.0.2.20:8091"

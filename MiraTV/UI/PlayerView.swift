@@ -92,9 +92,14 @@ struct PlayerView: View {
     /// 主/副の切替は 2ch の音声なら選べるようにする（番組表の「二か国語」情報が取れていなくても使えるように）
     private var audioSelectable: Bool { !isHLS && (isDualMono || engine.info.audioChannels == 2) }
     private var webBMLURL: URL? { Servers.webBML.flatMap { BMLURL.make(base: $0, service: current) } }
-    private var dataAvailable: Bool { modeID == -1 && webBMLURL != nil }
+    private var dataAvailable: Bool { modeID == -1 && viaPrimary && webBMLURL != nil }
+    /// 1 台目の Mirakurun で見ている（中継 streamd・データ放送 web-bml は 1 台目のチューナー前提）
+    private var viaPrimary: Bool {
+        guard let p = Servers.mirakurun else { return true }
+        return p.baseURL.host == client.baseURL.host && p.baseURL.port == client.baseURL.port
+    }
     private var choices: [PlaybackChoice] {
-        let relay = Servers.streamd != nil && !relayFailed
+        let relay = viaPrimary && Servers.streamd != nil && !relayFailed
         var base: [PlaybackChoice] = [.original]
         if oneSegService != nil { base.append(.oneSeg) }
         base.append(!relay && oneSegService != nil ? .audioOnlyOneSeg : .audioOnly(relay: relay))
@@ -364,7 +369,7 @@ struct PlayerView: View {
             if isAudioOnly { dataMode = false }
             engine.audioOnly = isAudioOnly
             // 音声のみ: 1. 自前の中継（映像を抜いた本放送の音声） 2. ワンセグの音声（地上波） 3. 原画質を受けて端末で映像を捨てる
-            if isAudioOnly, !relayFailed, let relay = Servers.streamdAudioURL(current) {
+            if isAudioOnly, viaPrimary, !relayFailed, let relay = Servers.streamdAudioURL(current) {
                 usingRelay = true
                 engine.play(url: relay)
             } else if isAudioOnly, !oneSegFailed, let one = oneSegService {
@@ -529,7 +534,7 @@ struct PlayerView: View {
     private func noteStall() {
         guard autoAudioOnly, modeID == -1, !tsActive else { recentStalls = []; return }
         // 軽いストリーム（streamd の音声のみ・ワンセグ）が無いなら、切り替えても通信量は減らないのでやめる
-        let lighter = (!relayFailed && Servers.streamdAudioURL(current) != nil) || (!oneSegFailed && oneSegService != nil)
+        let lighter = (viaPrimary && !relayFailed && Servers.streamdAudioURL(current) != nil) || (!oneSegFailed && oneSegService != nil)
         guard lighter else { return }
         let now = Date()
         recentStalls = recentStalls.filter { now.timeIntervalSince($0) < 60 } + [now]
@@ -543,7 +548,7 @@ struct PlayerView: View {
     // MARK: - 追っかけ再生
 
     /// 追っかけを使えるか（設定がオン・streamd がある・原画質で見ている）
-    private var tsAvailable: Bool { timeshiftEnabled && modeID == -1 && Servers.streamd != nil }
+    private var tsAvailable: Bool { timeshiftEnabled && modeID == -1 && viaPrimary && Servers.streamd != nil }
 
     /// ライブの端（バッファ開始からの秒）。info は 5 秒おきなので、その間は経過時間で進める
     private var liveEdge: Double {
