@@ -64,8 +64,16 @@ struct MirakurunClient {
         baseURL.appending(path: "api/services/\(service.id)/logo")
     }
 
-    /// 1 局ぶんの番組表（約 7 日・約 0.5MB）。全局まとめて取ると 38MB・27 秒かかるので必ず局単位で
+    /// 1 局ぶんの番組表（約 7 日・約 0.5MB）。全局まとめて取ると 38MB・27 秒かかるので必ず局単位で。
+    /// ただし Mirakurun 4.0 beta の一部は局の絞り込みを無視して全局ぶん（実測 2 万 4 千件・8.4MB）を返す。
+    /// その場合は返ってきた中から自分の局だけを選び、全局ぶん（この先 36 時間まで）を 10 分間覚えて他の局にも使い回す
     func programs(for service: MirakurunService) async throws -> [MirakurunProgram] {
+        try await ProgramBulk.shared.programs(base: baseURL.absoluteString, service: service) {
+            try await self.fetchPrograms(for: service)
+        }
+    }
+
+    fileprivate func fetchPrograms(for service: MirakurunService) async throws -> [MirakurunProgram] {
         var c = URLComponents(url: baseURL.appending(path: "api/programs"), resolvingAgainstBaseURL: false)!
         c.queryItems = [URLQueryItem(name: "networkId", value: String(service.networkId)),
                         URLQueryItem(name: "serviceId", value: String(service.serviceId))]

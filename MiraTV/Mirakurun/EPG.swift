@@ -14,14 +14,19 @@ struct MirakurunProgram: Decodable, Identifiable, Hashable {
     /// ISDB のコンポーネント種別 0x02 = デュアルモノ（主/副音声）
     let audioComponentTypes: [Int]
     let genreLv1: [Int]
+    /// どの局の番組か。サーバーによっては局の絞り込み（?serviceId=）を無視して全局ぶんを返すので、受け取った側で選ぶ
+    let networkId: Int?
+    let serviceId: Int?
 
-    enum CodingKeys: String, CodingKey { case id, name, description, startAt, duration, extended, audios, genres }
+    enum CodingKeys: String, CodingKey { case id, name, description, startAt, duration, extended, audios, genres, networkId, serviceId }
     private struct Audio: Decodable { let componentType: Int? }
     private struct Genre: Decodable { let lv1: Int? }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Int64.self, forKey: .id)
+        networkId = try? c.decodeIfPresent(Int.self, forKey: .networkId)
+        serviceId = try? c.decodeIfPresent(Int.self, forKey: .serviceId)
         name = try? c.decodeIfPresent(String.self, forKey: .name)
         description = try? c.decodeIfPresent(String.self, forKey: .description)
         startAt = try c.decode(Int64.self, forKey: .startAt)
