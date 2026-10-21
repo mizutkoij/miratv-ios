@@ -5,7 +5,7 @@ import Combine
 /// Usenet のアーカイブ（VPS1 の nzb-dl）の再生。docs/nzb-stream-playback.md
 ///
 /// - 本体が .ts: 自前の FFmpeg エンジン（録画と同じ。Range で読むのでシーク・字幕・PiP が使える）
-/// - 本体が .mp4: AVPlayer（配信サービス由来の録画。字幕・データ放送は無い）
+/// - 本体が .mp4: AVPlayer（配信サービス由来の録画。字幕・データ放送は無い）。画面と操作は TS と同じ自前のもの（AVFilePlayback）
 /// - 本体が .7z: 2026-09-18 より前の暗号化アーカイブ。丸ごと取らないと読めないので再生しない
 ///
 /// nzb-dl は初めて触る位置を Usenet から取るので、開いた直後とシーク直後は 1〜3 秒（数回測り直すと十数秒）かかる。
@@ -35,8 +35,8 @@ struct UsenetPlayerView: View {
     @State private var everPlayed = false
     @State private var startTask: Task<Void, Never>?
 
-    @State private var avPlayer: AVPlayer?
-    @State private var mp4Paused = false
+    /// mp4・音声ファイル（AVPlayer）
+    @StateObject private var av = AVFilePlayback()
     @State private var captionsOn = false
     @State private var showPanel = true
     @State private var scrub: Double?
@@ -60,8 +60,6 @@ struct UsenetPlayerView: View {
         ZStack {
             if session.minimized {
                 miniBar
-            } else if mode == .mp4 {
-                mp4Layout
             } else {
                 GeometryReader { geo in
                     let landscape = geo.size.width > geo.size.height
@@ -84,14 +82,22 @@ struct UsenetPlayerView: View {
         .onReceive(clockTicker) { _ in onClockTick() }
         .onChange(of: engine.reachedEnd) { _, ended in
             if ended && mode == .ts { handleEnded() }
-            if !ended { autoNextAt = nil }      // 案内の間に戻して見始めたら、次へは進まない
+            if !ended && mode == .ts { autoNextAt = nil }      // 案内の間に戻して見始めたら、次へは進まない
         }
+        .onChange(of: av.reachedEnd) { _, ended in
+            if ended && mode == .mp4 { handleEnded() }
+            if !ended && mode == .mp4 { autoNextAt = nil }
+        }
+        .onChange(of: av.state) { _, s in handleAVState(s) }
+        .onChange(of: av.hasPlayed) { _, played in if played && mode == .mp4 { everPlayed = true } }
+        .onChange(of: av.isPaused) { _, _ in if mode == .mp4 { updateNowPlaying() } }
         .onChange(of: autoNext) { _, on in if !on { autoNextAt = nil } }
-        // 終わりの通知は裏のスレッドから来ることがあるので、画面の状態はメインで触る
-        .onReceive(NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification)
-            .receive(on: DispatchQueue.main)) { n in
-            if mode == .mp4, let item = n.object as? AVPlayerItem, item === avPlayer?.currentItem { handleEnded() }
+        // TS の録画は背面・PiP ではハードウェアのエンコーダーが使えないので、それまでの分で保存する
+        // （mp4 は元のファイルから切り出すので、背面でもそのまま続けられる）
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            if mode == .ts && engine.isRecordingClip { toggleClip() }
         }
+        .onChange(of: engine.pip.isActive) { _, on in if on && mode == .ts && engine.isRecordingClip { toggleClip() } }
         .onDisappear {
             // 続きからの位置へまだ飛んでいない（開いてすぐ閉じた）ときは、前の位置を消さない
             if resumeAt == nil && currentPosition > 0 {
@@ -99,8 +105,9 @@ struct UsenetPlayerView: View {
             }
             startTask?.cancel()
             nowPlaying.deactivate()
+            saveClipBeforeClosing()
             engine.stop()
-            avPlayer?.pause()
+            av.stop()
             requestOrientation(.all)
         }
     }
@@ -172,6 +179,7 @@ struct UsenetPlayerView: View {
     }
 
     private func playTS(_ item: NzbItemRaw, resume: Double?) {
+        av.stop()
         mode = .ts
         if let resume { resumeAt = resume }
         nowPlaying.activate(onPlay: { engine.setPaused(false); updateNowPlaying() },
@@ -187,14 +195,41 @@ struct UsenetPlayerView: View {
         mode = .mp4
         engine.stop()
         resumeAt = nil      // TS から切り替わったとき、TS 用の待ちが残ると閉じるときに位置を保存しなくなる
+        nowPlaying.activate(onPlay: { av.setPaused(false); updateNowPlaying() },
+                            onPause: { av.setPaused(true); updateNowPlaying() },
+                            onSkip: { seek(by: $0); updateNowPlaying() })
         // /api/stream/<id> には拡張子が無いので、AVPlayer に中身の種類を教える
-        let asset = AVURLAsset(url: client.streamURL(id: item.id),
-                               options: [AVURLAssetOverrideMIMETypeKey: mime])
-        let p = AVPlayer(playerItem: AVPlayerItem(asset: asset))
-        avPlayer = p
-        mp4Paused = false
-        if let resume { p.seek(to: CMTime(seconds: resume, preferredTimescale: 600)) }
-        p.play()
+        av.play(url: client.streamURL(id: item.id), mime: mime, resume: resume)
+    }
+
+    /// mp4 の状態: 再生に入った・読めなかった（標準で読めない中身は自前のエンジンへ、それでもだめなら再投稿へ）
+    private func handleAVState(_ s: AVFilePlayback.State) {
+        guard mode == .mp4 else { return }
+        switch s {
+        case .playing:
+            updateNowPlaying()
+        case .failed(let msg):
+            saveClipBeforeClosing()
+            DebugLog.log("nzb", "標準プレイヤーでの再生に失敗 id=\(current?.id ?? "?"): \(msg)")
+            let pos = av.position > 5 ? av.position : (resumedFrom ?? 0)
+            av.stop()
+            // 標準のプレイヤーが対応していない中身（HEVC の一部・AC-3 の音声・変則の mp4 など）は、自前のエンジンで開き直す
+            if let cur = current, !avFellBack.contains(cur.id) {
+                avFellBack.insert(cur.id)
+                showToast("標準のプレイヤーで開けないので、別の方法で再生します")
+                everPlayed = false     // 自前のエンジンでも読めなければ、再投稿へ切り替えられるように
+                playTS(cur, resume: pos > 0 ? pos : nil)
+                return
+            }
+            if !everPlayed, let next = untriedAlternates.first {
+                showToast("読み込めなかったので、再投稿で再生します")
+                open(next, resume: pos > 0 ? pos : nil)
+            } else {
+                mode = .unavailable("再生できませんでした\n\(msg)")
+            }
+        default:
+            break
+        }
     }
 
     private var untriedAlternates: [NzbItemRaw] {
@@ -218,7 +253,7 @@ struct UsenetPlayerView: View {
 
     private func retry() {
         guard let current else { return }
-        let pos = engine.position
+        let pos = currentPosition
         if mode == .ts {
             engine.play(url: client.streamURL(id: current.id), file: true)
             if pos > 5 { resumeAt = pos }
@@ -230,20 +265,146 @@ struct UsenetPlayerView: View {
     private func switchToAlternate() {
         guard let next = untriedAlternates.first else { return }
         let pos = currentPosition
-        avPlayer?.pause(); avPlayer = nil
+        av.stop()
         open(next, resume: pos > 5 ? pos : (resumeAt ?? resumedFrom))
     }
 
     // MARK: - 位置・ロック画面
 
-    private var currentPosition: Double {
-        if mode == .mp4 { return avPlayer?.currentTime().seconds ?? 0 }
-        return engine.position
+    private var currentPosition: Double { isAV ? av.position : engine.position }
+
+    private var currentDuration: Double { isAV ? av.duration : engine.duration }
+
+    // MARK: - TS と mp4 で同じ操作（どちらのエンジンかは mode で決まる）
+
+    private var isAV: Bool { mode == .mp4 }
+    private var isPaused: Bool { isAV ? av.isPaused : engine.isPaused }
+    private var rate: Double { isAV ? av.playbackRate : engine.playbackRate }
+    private var isSeekable: Bool { isAV ? av.duration > 0 : engine.isSeekable }
+    private var reachedEnd: Bool { isAV ? av.reachedEnd : engine.reachedEnd }
+    private var displayAspect: CGFloat { isAV ? av.displayAspect : CGFloat(engine.info.displayAspect) }
+    private var hasCaption: Bool { !isAV && engine.info.hasCaption }
+
+    private func seek(to t: Double) {
+        cancelClipForSeek()
+        if isAV { av.seek(to: t) } else { engine.seek(to: t) }
     }
 
-    private var currentDuration: Double {
-        if mode == .mp4, let d = avPlayer?.currentItem?.duration.seconds, d.isFinite { return d }
-        return engine.duration
+    private func seek(by d: Double) {
+        cancelClipForSeek()
+        if isAV { av.seek(by: d) } else { engine.seek(by: d) }
+    }
+
+    private func togglePause() {
+        if isAV { av.togglePause() } else { engine.togglePause() }
+    }
+
+    private func setSpeed(_ s: Double) {
+        if isAV { av.setSpeed(s) } else { engine.setSpeed(s) }
+    }
+
+    /// 映像（TS は自前のレイヤー、mp4 は AVPlayerLayer、音声だけならその表示）
+    @ViewBuilder private var videoSurface: some View {
+        if isAV {
+            if av.hasVideo {
+                AVLayerSurface(layer: av.playerLayer)
+            } else {
+                VStack(spacing: 8) {
+                    Image(systemName: "waveform").font(.system(size: 34)).foregroundStyle(Theme.C.muted)
+                    Text("音声のみ").font(Theme.F.caption).foregroundStyle(Theme.C.text4)
+                }
+            }
+        } else {
+            VideoSurface(layer: engine.displayLayer)
+        }
+    }
+
+    private var pipActive: Bool { isAV ? av.pipActive : engine.pip.isActive }
+
+    @ViewBuilder private var pipTile: some View {
+        if isAV {
+            ControlTile(icon: "pip", label: "PiP", enabled: av.hasVideo && av.pipPossible, active: av.pipActive) { av.togglePiP() }
+        } else {
+            PiPTile(pip: engine.pip, supported: true)
+        }
+    }
+
+    @ViewBuilder private var pipCapsule: some View {
+        if isAV {
+            CapsuleTile(label: "PiP", enabled: av.hasVideo && av.pipPossible, active: av.pipActive) { av.togglePiP() }
+        } else {
+            PiPCapsule(pip: engine.pip, supported: true)
+        }
+    }
+
+    // MARK: - 録画（クリップ）
+
+    private var isClipping: Bool { isAV ? av.clipStart != nil : engine.isRecordingClip }
+    private var canClip: Bool { isAV ? av.hasVideo : true }
+
+    /// 動画で保存: 1 回目で録り始め、もう 1 回で止めて写真アプリへ。最大 5 分。
+    /// TS は映っている 1 枚ずつを書き出す。mp4 はその区間を元のファイルから切り出す
+    private func toggleClip() {
+        if isAV {
+            if av.clipStart != nil {
+                showToast("動画を書き出しています…（Usenet から読み直すので少しかかります）", seconds: 10)
+                Task {
+                    let msg = await av.finishClip()
+                    if !msg.isEmpty { showToast(msg) }
+                }
+            } else if av.startClip() {
+                showToast("録画を始めました（もう一度押すと保存・最大 5 分）")
+            } else {
+                showToast("まだ再生の準備ができていません")
+            }
+            return
+        }
+        if engine.isRecordingClip {
+            guard let rec = engine.takeClip() else { return }
+            showToast("動画を書き出しています…")
+            Task {
+                let msg = await rec.finishAndSave()
+                if !msg.isEmpty { showToast(msg) }
+            }
+        } else if engine.startClip(onLimit: { if engine.isRecordingClip { toggleClip() } }) {
+            showToast("録画を始めました（もう一度押すと保存・最大 5 分）")
+        } else {
+            showToast("まだ映像がありません")
+        }
+    }
+
+    /// 閉じる・次の回へ進む・読めなくなったときに録画の途中なら、それまでの分を保存する（捨てない）。
+    /// 画面はもう無いので、結果は表示せず記録だけ残す
+    private func saveClipBeforeClosing() {
+        if let r = av.takeClipRange(), r.to - r.from >= 1 {
+            Task {
+                let msg = await AVFilePlayback.saveClip(asset: r.asset, from: r.from, to: r.to)
+                DebugLog.log("clip", "閉じる前の録画を保存: \(msg)")
+            }
+        }
+        if engine.isRecordingClip, let rec = engine.takeClip() {
+            Task {
+                let msg = await rec.finishAndSave()
+                DebugLog.log("clip", "閉じる前の録画を保存: \(msg)")
+            }
+        }
+    }
+
+    /// 録画の途中でシークしたら、その録画は取り消す（TS のエンジンも同じ）
+    private func cancelClipForSeek() {
+        guard isClipping else { return }
+        if isAV { av.cancelClip() }
+        showToast("シークしたので録画を取り消しました")
+    }
+
+    private func clipTile() -> some View {
+        ControlTile(icon: isClipping ? "stop.circle.fill" : "record.circle",
+                    label: isClipping ? "保存 \(clock(isAV ? av.clipSeconds : engine.clipSeconds))" : "録画",
+                    enabled: canClip, active: isClipping) { toggleClip() }
+    }
+
+    private func clipCapsule() -> some View {
+        CapsuleTile(label: isClipping ? "● 保存" : "録画", enabled: canClip, active: isClipping) { toggleClip() }
     }
 
     // MARK: - 次の回
@@ -313,30 +474,9 @@ struct UsenetPlayerView: View {
 
     /// 0.25 秒ごと: 5 秒ごとに位置を保存・ロック画面の表示・mp4 の失敗の検出・次の回への自動の切り替え
     private func onClockTick() {
-        if let at = autoNextAt {
-            // mp4 で案内の間に戻した（終わりから離れた）ら、次へは進まない
-            if mode == .mp4, let p = avPlayer, p.rate != 0 { autoNextAt = nil }
-            else if autoNext, Date() >= at { playNext(); return }
-        }
-        if mode == .mp4, let item = avPlayer?.currentItem, item.status == .failed {
-            let msg = item.error.map { describeError($0) } ?? "再生できませんでした"
-            DebugLog.log("nzb", "標準プレイヤーでの再生に失敗 id=\(current?.id ?? "?"): \(msg)")
-            avPlayer?.pause(); avPlayer = nil
-            // 標準のプレイヤーが対応していない中身（HEVC の一部・AC-3 の音声・変則の mp4 など）は、自前のエンジンで開き直す
-            if let cur = current, !avFellBack.contains(cur.id) {
-                avFellBack.insert(cur.id)
-                showToast("標準のプレイヤーで開けないので、別の方法で再生します")
-                playTS(cur, resume: resumeAt ?? resumedFrom)
-                return
-            }
-            if let next = untriedAlternates.first {
-                showToast("読み込めなかったので、再投稿で再生します")
-                open(next, resume: resumedFrom)
-            } else {
-                mode = .unavailable("再生できませんでした\n\(msg)")
-            }
-            return
-        }
+        if let at = autoNextAt, autoNext, Date() >= at { playNext(); return }
+        // mp4 の録画は 5 分で止めて保存する（TS は ClipRecorder が自分で止める）
+        if isAV, let s = av.clipStart, av.position - s >= AVFilePlayback.maxClipSeconds { toggleClip() }
         let pos = currentPosition
         guard pos.isFinite, pos > 0 else { return }
         // 残り 90 秒を切ったら「見た」（エンディングを飛ばして閉じても見たことにする。続きの位置が消えるのと同じ基準）
@@ -345,24 +485,32 @@ struct UsenetPlayerView: View {
         if Date().timeIntervalSince(lastSaved) > 5 {
             lastSaved = Date()
             WatchPositions.save(key: entry.watchKey, position: pos, duration: currentDuration)
-            if mode == .ts { updateNowPlaying() }
+            updateNowPlaying()
         }
     }
 
     private func updateNowPlaying() {
         nowPlaying.update(title: entry.title, channel: entry.station.isEmpty ? "アーカイブ" : entry.station,
                           artworkURL: nil, isLive: false,
-                          position: engine.position, duration: currentDuration,
-                          rate: engine.isPaused ? 0 : engine.playbackRate)
+                          position: currentPosition, duration: currentDuration,
+                          rate: isPaused ? 0 : rate)
     }
 
     private func restartFromBeginning() {
         resumedFrom = nil
         WatchPositions.save(key: entry.watchKey, position: 0, duration: currentDuration)
-        if mode == .mp4 { avPlayer?.seek(to: .zero) } else { resumeAt = nil; engine.seek(to: 0) }
+        resumeAt = nil
+        seek(to: 0)
     }
 
     private func capture() {
+        if isAV {
+            Task {
+                guard let img = await av.captureImage() else { showToast("まだ映像がありません"); return }
+                showToast(await CaptureSaver.save(img))
+            }
+            return
+        }
         guard let img = engine.captureImage() else { showToast("まだ映像がありません"); return }
         Task { showToast(await CaptureSaver.save(img)) }
     }
@@ -390,10 +538,10 @@ struct UsenetPlayerView: View {
     private var videoStack: some View {
         ZStack {
             Theme.C.video
-            VideoSurface(layer: engine.displayLayer)
-                .aspectRatio(engine.info.displayAspect, contentMode: .fit)
+            videoSurface
+                .aspectRatio(displayAspect, contentMode: .fit)
             CaptionOverlay(controller: captions)
-                .aspectRatio(engine.info.displayAspect, contentMode: .fit)
+                .aspectRatio(displayAspect, contentMode: .fit)
                 .opacity(captionsOn ? 1 : 0)
                 .allowsHitTesting(false)
             stateOverlay
@@ -413,7 +561,12 @@ struct UsenetPlayerView: View {
             }
             .padding(24)
         case .mp4:
-            EmptyView()
+            switch av.state {
+            case .loading, .buffering:
+                loading(av.position > 0 ? "読み込み中…（初めて見る位置は数秒かかります）" : "Usenet から読み込んでいます…")
+            default:
+                if av.reachedEnd && autoNextAt == nil { restartButton }
+            }
         case .ts:
             switch engine.state {
             case .connecting, .buffering:
@@ -432,17 +585,19 @@ struct UsenetPlayerView: View {
                 }
                 .padding()
             default:
-                if engine.reachedEnd && autoNextAt == nil {
-                    Button { engine.seek(to: 0) } label: {
-                        Label("最初から再生", systemImage: "gobackward")
-                            .font(Theme.F.jp(14, .bold)).foregroundStyle(Theme.C.onAccent)
-                            .padding(.horizontal, 16).frame(height: 44)
-                            .background(Theme.C.accent, in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                }
+                if engine.reachedEnd && autoNextAt == nil { restartButton }
             }
         }
+    }
+
+    private var restartButton: some View {
+        Button { seek(to: 0); if isAV { av.setPaused(false) } } label: {
+            Label("最初から再生", systemImage: "gobackward")
+                .font(Theme.F.jp(14, .bold)).foregroundStyle(Theme.C.onAccent)
+                .padding(.horizontal, 16).frame(height: 44)
+                .background(Theme.C.accent, in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     private func loading(_ text: String) -> some View {
@@ -485,25 +640,25 @@ struct UsenetPlayerView: View {
     }
 
     private var speedLabel: String {
-        let r = engine.playbackRate
+        let r = rate
         return r == r.rounded() ? "\(Int(r))x" : String(format: "%.2gx", r)
     }
 
     private var sliderBinding: Binding<Double> {
-        Binding(get: { scrub ?? engine.position }, set: { scrub = $0 })
+        Binding(get: { scrub ?? currentPosition }, set: { scrub = $0 })
     }
 
     /// シークは指を離したときだけ（つまみを動かすたびに Usenet を読みに行かないように）
     private func commitScrub() {
-        if let s = scrub { resumedFrom = nil; engine.seek(to: s); scrub = nil }
+        if let s = scrub { resumedFrom = nil; seek(to: s); scrub = nil }
     }
 
     private var seekSlider: some View {
-        Slider(value: sliderBinding, in: 0...max(engine.duration, 1)) { editing in
+        Slider(value: sliderBinding, in: 0...max(currentDuration, 1)) { editing in
             if !editing { commitScrub() }
         }
         .tint(Theme.C.accent)
-        .disabled(!engine.isSeekable)
+        .disabled(!isSeekable)
     }
 
     private func transportButton(_ systemName: String, size: CGFloat = 44, filled: Bool = false,
@@ -516,13 +671,13 @@ struct UsenetPlayerView: View {
                 .background(filled ? Theme.C.accent : Color.clear, in: Circle())
         }
         .buttonStyle(.plain)
-        .disabled(!engine.isSeekable && systemName != "pause.fill" && systemName != "play.fill")
+        .disabled(!isSeekable && systemName != "pause.fill" && systemName != "play.fill")
     }
 
     private var speedMenu: some View {
         Menu {
             ForEach(Self.speeds, id: \.self) { s in
-                Button(s == s.rounded() ? "\(Int(s))x" : String(format: "%.2fx", s)) { engine.setSpeed(s) }
+                Button(s == s.rounded() ? "\(Int(s))x" : String(format: "%.2fx", s)) { setSpeed(s) }
             }
         } label: {
             Text(speedLabel).font(Theme.F.mono(13)).foregroundStyle(Theme.C.text2)
@@ -538,7 +693,7 @@ struct UsenetPlayerView: View {
                 .font(Theme.F.jp(13)).foregroundStyle(Theme.C.text3)
             HStack(spacing: 6) {
                 TagView(text: "Usenet")
-                TagView(text: mode == .mp4 ? "MP4" : "TS")
+                TagView(text: mode == .mp4 ? (av.hasVideo ? "MP4" : "音声") : "TS")
                 ForEach(entry.flags, id: \.self) { TagView(text: $0) }
                 if !entry.alternates.isEmpty { TagView(text: "再投稿 \(entry.alternates.count)") }
             }
@@ -573,7 +728,7 @@ struct UsenetPlayerView: View {
         if !sizeText.isEmpty { parts.append(sizeText) }
         switch mode {
         case .ts: parts.append(engine.isSeekable ? "シーク可（初めての位置は数秒）" : "シーク準備中…")
-        case .mp4: parts.append("標準のコントロールでシーク可 · 字幕なし")
+        case .mp4: parts.append(isSeekable ? "シーク可 · 字幕なし" : "読み込み中…")
         default: break
         }
         if let c = current, c.id != entry.id { parts.append("再投稿を再生中") }
@@ -583,26 +738,13 @@ struct UsenetPlayerView: View {
     // MARK: - ミニプレイヤー
 
     private var miniBar: some View {
-        let paused = mode == .mp4 ? mp4Paused : engine.isPaused
+        let paused = isPaused
         return MiniPlayerBar(
             title: entry.title,
-            subtitle: mode == .mp4 ? "アーカイブ · MP4" : "アーカイブ · \(clock(engine.position)) / \(clock(engine.duration))",
-            video: {
-                if mode == .mp4 {
-                    if let avPlayer { PlayerLayerSurface(player: avPlayer) }
-                } else {
-                    VideoSurface(layer: engine.displayLayer)
-                }
-            },
+            subtitle: "アーカイブ · \(clock(currentPosition)) / \(clock(currentDuration))",
+            video: { videoSurface },
             trailing: {
-                Button {
-                    if mode == .mp4 {
-                        guard let p = avPlayer else { return }
-                        if p.rate == 0 { p.play(); mp4Paused = false } else { p.pause(); mp4Paused = true }
-                    } else {
-                        engine.togglePause()
-                    }
-                } label: {
+                Button { togglePause() } label: {
                     Image(systemName: paused ? "play.fill" : "pause.fill")
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(Theme.C.text).frame(width: 44, height: 44)
@@ -632,28 +774,29 @@ struct UsenetPlayerView: View {
                     VStack(spacing: 8) {
                         seekSlider
                         HStack {
-                            Text(clock(scrub ?? engine.position)).font(Theme.F.mono(12, .medium))
+                            Text(clock(scrub ?? currentPosition)).font(Theme.F.mono(12, .medium))
                             Spacer()
-                            Text(clock(engine.duration)).font(Theme.F.mono(12, .medium))
+                            Text(clock(currentDuration)).font(Theme.F.mono(12, .medium))
                         }
                         .foregroundStyle(Theme.C.text3)
                         HStack(spacing: 18) {
-                            transportButton("gobackward.15") { engine.seek(by: -15) }
-                            transportButton(engine.isPaused ? "play.fill" : "pause.fill", size: 54, filled: true) {
-                                engine.togglePause()
+                            transportButton("gobackward.15") { seek(by: -15) }
+                            transportButton(isPaused ? "play.fill" : "pause.fill", size: 54, filled: true) {
+                                togglePause()
                             }
-                            transportButton("goforward.30") { engine.seek(by: 30) }
+                            transportButton("goforward.30") { seek(by: 30) }
                             Spacer()
                             speedMenu
                         }
                     }
                     .padding(.horizontal, 20).padding(.top, 12)
 
-                    HStack(spacing: 8) {
-                        ControlTile(icon: "captions.bubble", label: "字幕", enabled: engine.info.hasCaption,
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+                        ControlTile(icon: "captions.bubble", label: "字幕", enabled: hasCaption,
                                     active: captionsOn) { toggleCaptions() }
-                        ControlTile(icon: "camera", label: "写真") { capture() }
-                        PiPTile(pip: engine.pip, supported: true)
+                        ControlTile(icon: "camera", label: "写真", enabled: canClip) { capture() }
+                        clipTile()
+                        pipTile
                         ControlTile(icon: "arrow.up.left.and.arrow.down.right", label: "全画面") { requestOrientation(.landscape) }
                     }
                     .padding(.horizontal, 12)
@@ -679,9 +822,10 @@ struct UsenetPlayerView: View {
                                      foreground: Theme.C.text) { requestOrientation(.portrait) }
                         Text(entry.title).font(Theme.F.jp(17, .bold)).foregroundStyle(Theme.C.text).lineLimit(1)
                         Spacer()
-                        CapsuleTile(label: "字幕", enabled: engine.info.hasCaption, active: captionsOn) { toggleCaptions() }
-                        CapsuleTile(label: "写真") { capture() }
-                        PiPCapsule(pip: engine.pip, supported: true)
+                        CapsuleTile(label: "字幕", enabled: hasCaption, active: captionsOn) { toggleCaptions() }
+                        CapsuleTile(label: "写真", enabled: canClip) { capture() }
+                        clipCapsule()
+                        pipCapsule
                     }
                     .padding(.horizontal, 16).padding(.vertical, 8)
                     .background(Theme.C.overlayBar)
@@ -689,14 +833,14 @@ struct UsenetPlayerView: View {
                     Spacer()
 
                     HStack(spacing: 10) {
-                        transportButton("gobackward.15", size: 40) { engine.seek(by: -15) }
-                        transportButton(engine.isPaused ? "play.fill" : "pause.fill", size: 44, filled: true) {
-                            engine.togglePause()
+                        transportButton("gobackward.15", size: 40) { seek(by: -15) }
+                        transportButton(isPaused ? "play.fill" : "pause.fill", size: 44, filled: true) {
+                            togglePause()
                         }
-                        transportButton("goforward.30", size: 40) { engine.seek(by: 30) }
-                        Text(clock(scrub ?? engine.position)).font(Theme.F.mono(12, .medium)).foregroundStyle(Theme.C.text2)
+                        transportButton("goforward.30", size: 40) { seek(by: 30) }
+                        Text(clock(scrub ?? currentPosition)).font(Theme.F.mono(12, .medium)).foregroundStyle(Theme.C.text2)
                         seekSlider
-                        Text(clock(engine.duration)).font(Theme.F.mono(12, .medium)).foregroundStyle(Theme.C.text2)
+                        Text(clock(currentDuration)).font(Theme.F.mono(12, .medium)).foregroundStyle(Theme.C.text2)
                         speedMenu
                     }
                     .padding(.horizontal, 16).padding(.vertical, 8)
@@ -704,27 +848,5 @@ struct UsenetPlayerView: View {
                 }
             }
         }
-    }
-
-    // MARK: - mp4（AVPlayer）
-
-    private var mp4Layout: some View {
-        VStack(spacing: 0) {
-            ZStack(alignment: .topLeading) {
-                Theme.C.video
-                if let avPlayer { SystemPlayerView(player: avPlayer) }
-                nextOverlay.frame(maxWidth: .infinity, maxHeight: .infinity)
-                toastLayer
-                CircleButton(systemName: "chevron.down", size: 36, fill: Color.black.opacity(0.55),
-                             foreground: Theme.C.text) { session.minimize() }
-                    .padding(12)
-            }
-            .frame(maxWidth: .infinity)
-            .aspectRatio(16.0 / 9.0, contentMode: .fit)
-            ScrollView {
-                infoBlock.padding(20)
-            }
-        }
-        .background(Theme.C.bg.ignoresSafeArea())
     }
 }

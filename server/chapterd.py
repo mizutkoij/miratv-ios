@@ -18,6 +18,7 @@ API (bound to the Tailscale address only, no auth, read-only):
       -> {"status": ..., "progress": 0..1, "captions": [[t, "text"], ...]}  (closed captions as text, for search)
   GET /captions/search?q=<words>  -> {"indexed": n, "results": [{"id": videoFileId, "name": ..., "hits": [[t, text]]}]}
       searches every recording whose captions were already pulled out
+  GET /follow/info?name=  /follow?name=&t=   -> play a recording that is still being written (follow.py)
   GET /health
 (captions need arib_caption.py + arib_tables.json next to this file)
 Positions are seconds from the start of the file (ffmpeg zero-bases the stream), which is the same timeline the
@@ -53,6 +54,7 @@ MERGE_GAP = 20.0   # CM blocks closer than this are one break (a single missed s
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import arib_caption  # noqa: E402
+import follow  # noqa: E402
 
 CAPTION_ALGO = 1
 
@@ -532,6 +534,46 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _follow(self, u):
+        """録画中（まだ書き足されている）録画の追っかけ再生。follow.py を参照"""
+        qs = urllib.parse.parse_qs(u.query)
+        name = qs.get("name", [""])[0]
+        path = find_file_cached(name)
+        if not path or not name.lower().endswith((".ts", ".m2ts")):
+            return self._json({"error": "file not found"}, 404)
+        try:
+            if u.path == "/follow/info":
+                return self._json(follow.index_for(path).info())
+            t = float(qs.get("t", ["0"])[0] or 0)
+        except (ValueError, RuntimeError, OSError) as e:
+            return self._json({"error": str(e)}, 400)
+        # 黙って消えた（ネットワークごと切れた）端末で、スレッドとファイルを持ち続けないように
+        import socket
+        try:
+            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            if hasattr(socket, "TCP_KEEPIDLE"):
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 15)
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 4)
+            self.connection.settimeout(3600)       # 一時停止で読まれないのは 1 時間まで
+        except OSError:
+            pass
+        self.send_response(200)
+        self.send_header("Content-Type", "video/mp2t")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+        def write(b):
+            self.wfile.write(b"%X\r\n" % len(b) + b + b"\r\n")
+        try:
+            follow.stream(path, t if t == t else 0.0, write)
+            self.wfile.write(b"0\r\n\r\n")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:  # noqa: BLE001  ヘッダーを送ったあとなので、切るだけ
+            log("follow failed", name, e)
+
     def do_HEAD(self):
         if urllib.parse.urlparse(self.path).path == "/raw":
             return self._raw(True)
@@ -542,6 +584,8 @@ class Handler(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         if u.path == "/raw":
             return self._raw(False)
+        if u.path in ("/follow", "/follow/info"):
+            return self._follow(u)
         if u.path == "/health":
             with lock:
                 return self._json({"ok": True, "queue": len(queue), "jobs": len(jobs)})

@@ -44,6 +44,13 @@ struct RecordedPlayerView: View {
     @State private var resumeAt: Double?
     /// 字幕の文字の一覧（字幕で探す）
     @State private var showCaptionText = false
+    /// 録画中の録画: 速めに流して録画の端（ライブ）に追いつく倍率（nil = 等速）
+    @State private var followCatchUp: Double?
+    @State private var followRetried = false
+    /// 録画がまだ書き足されているか（5 秒おきに chapterd に聞く。開いたときの recorded.isRecording は古くなる）
+    @State private var followGrowing = true
+    @State private var startTask: Task<Void, Never>?
+    @State private var followOKTask: Task<Void, Never>?
 
     private static let speeds: [Double] = [0.75, 1.0, 1.25, 1.5, 2.0]
 
@@ -91,7 +98,16 @@ struct RecordedPlayerView: View {
             if !useAVPlayer { updateNowPlaying() }
             if ok, let t = resumeAt { resumeAt = nil; engine.seek(to: t) }
         }
-        .onReceive(clockTicker) { _ in onClockTick() }
+        .onReceive(clockTicker) { _ in
+            onClockTick()
+            // 追いつき中: 録画の端の 5 秒手前まで来たら等速に戻す
+            if followCatchUp != nil, engine.isFollowing, followBehind < 5 {
+                followCatchUp = nil
+                engine.setSpeed(1)
+                showToast("いま録っているところに追いつきました")
+            }
+        }
+        .task { await pollFollow() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
             // 背面・PiP ではハードウェアのエンコーダーが使えないので、それまでの分で保存する
             if engine.isRecordingClip { toggleClip() }
@@ -126,6 +142,8 @@ struct RecordedPlayerView: View {
             if resumeAt == nil && currentPosition > 0 {
                 WatchPositions.save(recorded.id, position: currentPosition, duration: currentDuration)
             }
+            startTask?.cancel()
+            followOKTask?.cancel()
             comments.stopAll()
             nowPlaying.deactivate()
             engine.stop()
@@ -175,7 +193,87 @@ struct RecordedPlayerView: View {
                 DebugLog.log("rec", "EPGStation 経由で再生 id=\(file.id)（直接配信の設定なし）")
             }
             tsSource = src
+            // 録画中（まだ書き足されている）なら、伸びる分も追いかけて流してもらう方式で開く
+            if recorded.isRecording == true, let name = file.filename, let c = Servers.chapters {
+                directPending = false
+                let at = saved ?? 0
+                resumeAt = nil
+                startTask = Task {
+                    let info = try? await c.followInfo(filename: name)
+                    guard !Task.isCancelled else { return }        // 待っている間に閉じた
+                    if let info, info.growing {
+                        DebugLog.log("rec", "録画中の録画を追いかけて再生 \(name) 録れている分 \(Int(info.duration))s")
+                        engine.playFollowing(start: min(at, max(info.duration - 3, 0)), duration: info.duration) {
+                            c.followURL(filename: name, t: $0)
+                        }
+                    } else {
+                        if at > 0 { resumeAt = at }
+                        directPending = true                     // 直接配信で開けなければ EPGStation へ
+                        engine.play(url: src, file: true)
+                    }
+                }
+                return
+            }
             engine.play(url: src, file: true)
+        }
+    }
+
+    // MARK: - 録画中の録画（追いかけ再生）
+
+    /// 録画中の録画で、いま録れている長さを 5 秒おきに聞く。録画が終わったら止める
+    private func pollFollow() async {
+        guard recorded.isRecording == true, let name = file?.filename, let c = Servers.chapters else { return }
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard engine.isFollowing, let info = try? await c.followInfo(filename: name) else { continue }
+            engine.setFollowDuration(info.duration)
+            followGrowing = info.growing
+            if !info.growing { return }
+        }
+    }
+
+    /// 録画の端（いま録っているところ）までの秒
+    private var followBehind: Double { max(engine.duration - engine.position, 0) }
+
+    /// 等速 → ×1.5 → ×2 → 等速。端の 5 秒手前まで来たら等速に戻す
+    private func cycleFollowCatchUp() {
+        let next: Double? = switch followCatchUp {
+        case nil: 1.5
+        case .some(1.5): 2.0
+        default: nil
+        }
+        followCatchUp = next
+        engine.setSpeed(next ?? 1)
+        if engine.isPaused { engine.setPaused(false) }
+        showToast(next.map { "×\($0 == 2 ? "2" : "1.5") で追いかけます（追いついたら等速に戻ります）" } ?? "等速に戻しました")
+    }
+
+    @ViewBuilder private var followControls: some View {
+        if engine.isFollowing {
+            HStack(spacing: 8) {
+                Button { cycleFollowCatchUp() } label: {
+                    Text(followCatchUp.map { $0 == 2 ? "×2" : "×1.5" } ?? "追う")
+                        .font(Theme.F.mono(12, .semibold))
+                        .foregroundStyle(followCatchUp != nil ? Theme.C.onAccent : Theme.C.text)
+                        .padding(.horizontal, 10).frame(height: 32)
+                        .background(followCatchUp != nil ? Theme.C.accent : Theme.C.surface, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("速めに流して、いま録っているところに追いつく")
+                Button {
+                    followCatchUp = nil
+                    engine.setSpeed(1)
+                    engine.seek(to: engine.duration)
+                } label: {
+                    Text(followBehind < 15 ? "LIVE" : "-\(clock(followBehind))")
+                        .font(Theme.F.mono(12, .semibold))
+                        .foregroundStyle(followBehind < 15 ? Theme.C.onAccent : Theme.C.text)
+                        .padding(.horizontal, 10).frame(height: 32)
+                        .background(followBehind < 15 ? Theme.C.live : Theme.C.surface, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("いま録っているところへ")
+            }
         }
     }
 
@@ -183,6 +281,29 @@ struct RecordedPlayerView: View {
         switch s {
         case .playing:
             directPending = false
+            // 10 秒ちゃんと流れてから「もう一度」を使えるようにする（端の数秒だけ流れてまた切れる、を繰り返さない）
+            followOKTask?.cancel()
+            followOKTask = Task {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                if !Task.isCancelled, case .playing = engine.state { followRetried = false }
+            }
+        case .failed(let msg) where engine.isFollowing:
+            // 録画中の追いかけ再生が終わった（録画が終わった・切れた）→ 1 回はその位置から流し直し、
+            // 駄目なら（録画が終わっていれば）普通の録画として開き直す
+            let at = engine.position
+            DebugLog.log("rec", "追いかけ再生が終わりました: \(msg)")
+            followCatchUp = nil
+            engine.setSpeed(1)
+            if !followRetried, followGrowing {
+                followRetried = true
+                engine.seek(to: at)
+            } else if let src = tsSource {
+                resumeAt = at
+                directPending = true
+                engine.play(url: src, file: true)
+                showToast(followGrowing ? "追いかけ再生を続けられないので、普通の再生に切り替えました"
+                                        : "録画が終わったので、普通の再生に切り替えました")
+            }
         case .failed(let msg):
             guard directPending, let file else { return }
             directPending = false
@@ -216,7 +337,8 @@ struct RecordedPlayerView: View {
 
     /// 解析は homeserver 側で非同期に走る（約 1 分/時間）。終わるまで 3 秒おきに聞く（最大 約 30 分）
     private func loadChapters() async {
-        guard cmDetection, !useAVPlayer, let file, let name = file.filename, let client = Servers.chapters else { return }
+        guard cmDetection, !useAVPlayer, recorded.isRecording != true, let file, let name = file.filename,
+              let client = Servers.chapters else { return }
         for _ in 0..<600 {
             if Task.isCancelled { return }
             do {
@@ -322,6 +444,8 @@ struct RecordedPlayerView: View {
 
     private var currentDuration: Double {
         if useAVPlayer, let d = avPlayer?.currentItem?.duration.seconds, d.isFinite { return d }
+        // 録画中は「いま録れている長さ」なので、端の近くで「見終わった」と消されないよう番組の長さを使う
+        if engine.isFollowing { return max(engine.duration, recorded.durationSeconds) }
         return engine.duration > 0 ? engine.duration : recorded.durationSeconds
     }
 
@@ -572,7 +696,8 @@ struct RecordedPlayerView: View {
                                 }
                                 transportButton("goforward.30") { engine.seek(by: 30) }
                                 Spacer()
-                                speedMenu
+                                followControls
+                                if !engine.isFollowing { speedMenu }
                             }
                             HStack(spacing: 10) {
                                 cmSkipButton()
@@ -680,8 +805,10 @@ struct RecordedPlayerView: View {
                         Text(clock(scrub ?? engine.position)).font(Theme.F.mono(12, .medium)).foregroundStyle(Theme.C.text2)
                         seekSlider
                         Text(clock(engine.duration)).font(Theme.F.mono(12, .medium)).foregroundStyle(Theme.C.text2)
-                        cmSkipButton(compact: true)
-                        speedMenu
+                        if engine.isFollowing { followControls } else {
+                            cmSkipButton(compact: true)
+                            speedMenu
+                        }
                     }
                     .padding(.horizontal, 16).padding(.vertical, 8)
                     .background(Theme.C.overlayBar)

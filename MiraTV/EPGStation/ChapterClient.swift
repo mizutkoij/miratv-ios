@@ -97,6 +97,32 @@ struct ChapterClient {
         return try JSONDecoder().decode(CaptionSearchResult.self, from: data)
     }
 
+    struct FollowInfo: Decodable {
+        /// いま録れている長さ（秒）
+        let duration: Double
+        let size: Int64?
+        /// まだ書き足されているか（false = 録画が終わった）
+        let growing: Bool
+    }
+
+    /// 録画中の録画: いま録れている長さ
+    func followInfo(filename: String) async throws -> FollowInfo {
+        var c = URLComponents(url: baseURL.appending(path: "follow/info"), resolvingAgainstBaseURL: false)!
+        c.queryItems = [URLQueryItem(name: "name", value: filename)]
+        var req = URLRequest(url: c.url!)
+        req.timeoutInterval = 10
+        let (data, res) = try await URLSession.shared.data(for: req)
+        if let http = res as? HTTPURLResponse, !(200..<300).contains(http.statusCode) { throw URLError(.badServerResponse) }
+        return try JSONDecoder().decode(FollowInfo.self, from: data)
+    }
+
+    /// 録画中の録画を t 秒から流し、書き足される分もそのまま流し続ける URL
+    func followURL(filename: String, t: Double) -> URL {
+        var c = URLComponents(url: baseURL.appending(path: "follow"), resolvingAgainstBaseURL: false)!
+        c.queryItems = [URLQueryItem(name: "name", value: filename), URLQueryItem(name: "t", value: String(format: "%.1f", max(t, 0)))]
+        return c.url!
+    }
+
     func chapters(videoFileId: Int, filename: String) async throws -> ChapterInfo {
         var c = URLComponents(url: baseURL.appending(path: "chapters/\(videoFileId)"), resolvingAgainstBaseURL: false)!
         c.queryItems = [URLQueryItem(name: "name", value: filename)]

@@ -107,8 +107,49 @@ final class PlayerEngine: ObservableObject {
         audioRenderer.allowedAudioSpatializationFormats = .multichannel
     }
 
+    // MARK: 録画中のファイル（まだ伸びている）: 位置・長さ・シークは「その時刻から流し直してもらう」で行う
+    @Published private(set) var isFollowing = false
+    private var followURL: ((Double) -> URL)?
+    private var followBase: Double = 0
+    private var restartingFollow = false
+    private var followDurationAt = Date()
+
+    /// 録画中の録画を start 秒から再生する。urlFor(秒) はその時刻から流す URL（chapterd の /follow）
+    func playFollowing(start: Double, duration: Double, urlFor: @escaping (Double) -> URL) {
+        followURL = urlFor
+        openFollow(at: start, duration: duration, paused: false)
+    }
+
+    private func openFollow(at t: Double, duration d: Double, paused: Bool) {
+        guard let urlFor = followURL else { return }
+        followBase = t
+        tracksStreamPosition = true
+        restartingFollow = true
+        play(url: urlFor(t), file: false)
+        restartingFollow = false
+        isFollowing = true
+        isSeekable = true
+        duration = d
+        followDurationAt = Date()
+        seekTarget = t
+        position = t
+        if paused { setPaused(true) }
+    }
+
+    /// 録画中: いま録れている長さ（ビューが数秒おきに chapterd に聞いて渡す）
+    func setFollowDuration(_ d: Double) {
+        if isFollowing && d > 0 { duration = d; followDurationAt = Date() }
+    }
+
+    /// 録画の端の見積もり（前に聞いてからも録画は進んでいる）
+    private var followEdge: Double { duration + min(Date().timeIntervalSince(followDurationAt), 10) }
+
     func play(url: URL, file: Bool = false) {
         stop()
+        if !restartingFollow {
+            isFollowing = false
+            followURL = nil
+        }
         isFile = file
         position = 0; duration = 0; isSeekable = false; isPaused = false; reachedEnd = false
         seekTarget = nil
@@ -135,8 +176,10 @@ final class PlayerEngine: ObservableObject {
                 DispatchQueue.main.async {
                     self.info = info
                     self.startTime = info.startTime
-                    self.isSeekable = info.isSeekable
-                    self.duration = info.duration > 0 ? info.duration : (self.durationHint ?? 0)
+                    if !self.isFollowing {          // 録画中の録画は、長さ・シークをこちらで持つ
+                        self.isSeekable = info.isSeekable
+                        self.duration = info.duration > 0 ? info.duration : (self.durationHint ?? 0)
+                    }
                     if self.isFile { self.pip.refresh() }
                     if self.state == .connecting { self.state = .buffering }
                 }
@@ -399,6 +442,15 @@ final class PlayerEngine: ObservableObject {
 
     /// 先頭からの秒数へシーク。末尾の約 2 秒手前までに丸める（TvtPlay と同じ）
     func seek(to seconds: Double) {
+        if isFollowing {
+            // 録画中: その時刻から流し直してもらう（いま録れている端の 3 秒手前まで）
+            let target = min(max(seconds, 0), max(followEdge - 3, 0))
+            // 先へ飛ぶつもりが、端の見積もりのせいで後ろに戻ってしまうなら何もしない
+            if seconds > position && target <= position + 1 { return }
+            reachedEnd = false
+            openFollow(at: target, duration: duration, paused: false)
+            return
+        }
         guard isFile, isSeekable else { return }
         let target = min(max(seconds, 0), max(effectiveDuration - 2, 0))
         seekTarget = target
@@ -462,7 +514,8 @@ final class PlayerEngine: ObservableObject {
         let now = synchronizer.currentTime().seconds
         guard now.isFinite else { return }
         if !isFile {
-            position = max(now - origin, 0)        // 追っかけ再生: このストリームを出し始めてからの秒
+            // 追っかけ再生: このストリームを出し始めてからの秒（録画中の録画は、流し始めた位置を足す）
+            position = (isFollowing ? followBase : 0) + max(now - origin, 0)
             return
         }
         let upper = effectiveDuration > 0 ? effectiveDuration : Double.greatestFiniteMagnitude
