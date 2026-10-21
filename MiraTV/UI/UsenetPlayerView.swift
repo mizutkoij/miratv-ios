@@ -89,6 +89,7 @@ struct UsenetPlayerView: View {
             if !ended && mode == .mp4 { autoNextAt = nil }
         }
         .onChange(of: av.state) { _, s in handleAVState(s) }
+        .onChange(of: av.hasPlayed) { _, played in if played && mode == .mp4 { everPlayed = true } }
         .onChange(of: av.isPaused) { _, _ in if mode == .mp4 { updateNowPlaying() } }
         .onChange(of: autoNext) { _, on in if !on { autoNextAt = nil } }
         // TS の録画は背面・PiP ではハードウェアのエンコーダーが使えないので、それまでの分で保存する
@@ -104,6 +105,7 @@ struct UsenetPlayerView: View {
             }
             startTask?.cancel()
             nowPlaying.deactivate()
+            saveClipBeforeClosing()
             engine.stop()
             av.stop()
             requestOrientation(.all)
@@ -195,7 +197,7 @@ struct UsenetPlayerView: View {
         resumeAt = nil      // TS から切り替わったとき、TS 用の待ちが残ると閉じるときに位置を保存しなくなる
         nowPlaying.activate(onPlay: { av.setPaused(false); updateNowPlaying() },
                             onPause: { av.setPaused(true); updateNowPlaying() },
-                            onSkip: { av.seek(by: $0); updateNowPlaying() })
+                            onSkip: { seek(by: $0); updateNowPlaying() })
         // /api/stream/<id> には拡張子が無いので、AVPlayer に中身の種類を教える
         av.play(url: client.streamURL(id: item.id), mime: mime, resume: resume)
     }
@@ -205,9 +207,9 @@ struct UsenetPlayerView: View {
         guard mode == .mp4 else { return }
         switch s {
         case .playing:
-            everPlayed = true
             updateNowPlaying()
         case .failed(let msg):
+            saveClipBeforeClosing()
             DebugLog.log("nzb", "標準プレイヤーでの再生に失敗 id=\(current?.id ?? "?"): \(msg)")
             let pos = av.position > 5 ? av.position : (resumedFrom ?? 0)
             av.stop()
@@ -215,6 +217,7 @@ struct UsenetPlayerView: View {
             if let cur = current, !avFellBack.contains(cur.id) {
                 avFellBack.insert(cur.id)
                 showToast("標準のプレイヤーで開けないので、別の方法で再生します")
+                everPlayed = false     // 自前のエンジンでも読めなければ、再投稿へ切り替えられるように
                 playTS(cur, resume: pos > 0 ? pos : nil)
                 return
             }
@@ -279,7 +282,7 @@ struct UsenetPlayerView: View {
     private var rate: Double { isAV ? av.playbackRate : engine.playbackRate }
     private var isSeekable: Bool { isAV ? av.duration > 0 : engine.isSeekable }
     private var reachedEnd: Bool { isAV ? av.reachedEnd : engine.reachedEnd }
-    private var displayAspect: CGFloat { isAV ? av.displayAspect : engine.info.displayAspect }
+    private var displayAspect: CGFloat { isAV ? av.displayAspect : CGFloat(engine.info.displayAspect) }
     private var hasCaption: Bool { !isAV && engine.info.hasCaption }
 
     private func seek(to t: Double) {
@@ -367,6 +370,23 @@ struct UsenetPlayerView: View {
             showToast("録画を始めました（もう一度押すと保存・最大 5 分）")
         } else {
             showToast("まだ映像がありません")
+        }
+    }
+
+    /// 閉じる・次の回へ進む・読めなくなったときに録画の途中なら、それまでの分を保存する（捨てない）。
+    /// 画面はもう無いので、結果は表示せず記録だけ残す
+    private func saveClipBeforeClosing() {
+        if let r = av.takeClipRange(), r.to - r.from >= 1 {
+            Task {
+                let msg = await AVFilePlayback.saveClip(asset: r.asset, from: r.from, to: r.to)
+                DebugLog.log("clip", "閉じる前の録画を保存: \(msg)")
+            }
+        }
+        if engine.isRecordingClip, let rec = engine.takeClip() {
+            Task {
+                let msg = await rec.finishAndSave()
+                DebugLog.log("clip", "閉じる前の録画を保存: \(msg)")
+            }
         }
     }
 

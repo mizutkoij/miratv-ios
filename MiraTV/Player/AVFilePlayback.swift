@@ -28,6 +28,8 @@ final class AVFilePlayback: NSObject, ObservableObject, AVPictureInPictureContro
     @Published private(set) var pipActive = false
     /// 録画の開始位置（秒）。録っていなければ nil
     @Published private(set) var clipStart: Double?
+    /// この item で一度でも実際に再生が進んだか（読めない投稿を再投稿へ切り替えるかの判断に使う）
+    @Published private(set) var hasPlayed = false
 
     /// これを超えたら自動で止める（TS の録画と同じ上限）
     static let maxClipSeconds: Double = ClipRecorder.maxSeconds
@@ -44,6 +46,8 @@ final class AVFilePlayback: NSObject, ObservableObject, AVPictureInPictureContro
     /// 読み込みが終わったら飛ぶ位置（続きから）
     private var pendingSeek: Double?
     private static let ciContext = CIContext()
+    /// 開くたびに増える。前の item の遅れて届いた通知を捨てるため
+    private var generation = 0
 
     override init() {
         super.init()
@@ -74,7 +78,10 @@ final class AVFilePlayback: NSObject, ObservableObject, AVPictureInPictureContro
     /// mime: URL に拡張子が無い（nzb-dl の /api/stream/<id>）ので、中身の種類を教える
     func play(url: URL, mime: String, resume: Double?) {
         stop()
+        generation += 1
+        let gen = generation
         state = .loading
+        hasPlayed = false
         hasVideo = mime.hasPrefix("video")
         let asset = AVURLAsset(url: url, options: [AVURLAssetOverrideMIMETypeKey: mime])
         self.asset = asset
@@ -87,17 +94,24 @@ final class AVFilePlayback: NSObject, ObservableObject, AVPictureInPictureContro
         observations = [
             item.observe(\.status, options: [.new]) { [weak self] item, _ in
                 let status = item.status, err = item.error
-                DispatchQueue.main.async { self?.statusChanged(status, err) }
+                DispatchQueue.main.async {
+                    guard let self, self.generation == gen else { return }
+                    self.statusChanged(status, err)
+                }
             },
             item.observe(\.presentationSize, options: [.new]) { [weak self] item, _ in
                 let s = item.presentationSize
                 DispatchQueue.main.async {
-                    if s.width > 0, s.height > 0 { self?.displayAspect = s.width / s.height }
+                    guard let self, self.generation == gen else { return }
+                    if s.width > 0, s.height > 0 { self.displayAspect = s.width / s.height }
                 }
             },
             player.observe(\.timeControlStatus, options: [.new]) { [weak self] p, _ in
                 let s = p.timeControlStatus
-                DispatchQueue.main.async { self?.controlChanged(s) }
+                DispatchQueue.main.async {
+                    guard let self, self.generation == gen else { return }
+                    self.controlChanged(s)
+                }
             },
         ]
         endObserver = NotificationCenter.default.addObserver(forName: AVPlayerItem.didPlayToEndTimeNotification,
@@ -113,6 +127,7 @@ final class AVFilePlayback: NSObject, ObservableObject, AVPictureInPictureContro
     }
 
     func stop() {
+        generation += 1
         if pip?.isPictureInPictureActive == true { pip?.stopPictureInPicture() }
         player.pause()
         player.replaceCurrentItem(with: nil)
@@ -134,7 +149,8 @@ final class AVFilePlayback: NSObject, ObservableObject, AVPictureInPictureContro
         case .readyToPlay:
             updateDuration()
             if let t = pendingSeek { pendingSeek = nil; seek(to: t) }
-            if state == .loading { state = .buffering }
+            // 読み込み中に一時停止していたら、読み込みは終わっているので「読み込み中」を出し続けない
+            if state == .loading { state = player.timeControlStatus == .paused ? .playing : .buffering }
         case .failed:
             state = .failed(describeError(error ?? URLError(.cannotDecodeContentData)))
         default:
@@ -144,11 +160,21 @@ final class AVFilePlayback: NSObject, ObservableObject, AVPictureInPictureContro
 
     private func controlChanged(_ s: AVPlayer.TimeControlStatus) {
         if case .failed = state { return }
+        // isPaused は実際の状態に合わせる（PiP の再生ボタン・イヤホンを外した・電話などで止まることがある）
         switch s {
-        case .playing: state = .playing
-        case .waitingToPlayAtSpecifiedRate: if state != .loading { state = .buffering }
-        case .paused: if state == .buffering { state = .playing }   // 一時停止は「読み込み中」ではない
-        @unknown default: break
+        case .playing:
+            state = .playing
+            isPaused = false
+            hasPlayed = true
+        case .waitingToPlayAtSpecifiedRate:
+            if state != .loading { state = .buffering }
+            isPaused = false
+        case .paused:
+            isPaused = true
+            // 一時停止は「読み込み中」ではない（読み込みが終わっていれば。最初の読み込み中ならそのまま）
+            if state == .buffering, player.currentItem?.status == .readyToPlay { state = .playing }
+        @unknown default:
+            break
         }
     }
 
@@ -169,6 +195,8 @@ final class AVFilePlayback: NSObject, ObservableObject, AVPictureInPictureContro
 
     func seek(to seconds: Double) {
         guard player.currentItem?.status == .readyToPlay else { pendingSeek = seconds; return }
+        // 録画の途中でシークしたら、その録画は取り消す（ロック画面・PiP のスキップでも区間がずれないように）
+        clipStart = nil
         let t = duration > 0 ? min(max(seconds, 0), max(duration - 1, 0)) : max(seconds, 0)
         position = t
         reachedEnd = false
@@ -249,15 +277,21 @@ final class AVFilePlayback: NSObject, ObservableObject, AVPictureInPictureContro
     func cancelClip() { clipStart = nil }
 
     /// 止めて、その区間を写真に保存する。結果の一言を返す
-    func finishClip() async -> String {
-        guard let start = clipStart, let asset else { return "" }
-        clipStart = nil
-        let end = min(position, start + Self.maxClipSeconds)
-        guard end - start >= 1 else { return "短すぎるので保存しませんでした（1 秒以上）" }
-        return await Self.export(asset: asset, from: start, to: end)
+    @MainActor func finishClip() async -> String {
+        guard let r = takeClipRange() else { return "" }
+        guard r.to - r.from >= 1 else { return "短すぎるので保存しませんでした（1 秒以上）" }
+        return await Self.saveClip(asset: r.asset, from: r.from, to: r.to)
     }
 
-    private static func export(asset: AVURLAsset, from: Double, to: Double) async -> String {
+    /// 録画を止めて、保存する区間を返す（すぐ返る。閉じる直前でも区間を失わないように、保存は呼び出し側で）
+    func takeClipRange() -> (asset: AVURLAsset, from: Double, to: Double)? {
+        guard let start = clipStart, let asset else { clipStart = nil; return nil }
+        clipStart = nil
+        return (asset, start, min(position, start + Self.maxClipSeconds))
+    }
+
+    /// 区間を元のファイルから切り出して写真に保存する。結果の一言を返す
+    static func saveClip(asset: AVURLAsset, from: Double, to: Double) async -> String {
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard status == .authorized || status == .limited else {
             return "写真への保存が許可されていません（設定 › プライバシー › 写真）"
