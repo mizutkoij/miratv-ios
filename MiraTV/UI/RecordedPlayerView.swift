@@ -108,6 +108,16 @@ struct RecordedPlayerView: View {
             }
         }
         .task { await pollFollow() }
+        .onChange(of: engine.reachedEnd) { _, end in
+            // 普通の再生で端まで来たが、ファイルがまだ伸びている（録画中だった）→ 追いかけ再生に切り替えて続ける
+            guard end, !engine.isFollowing, !useAVPlayer, let name = file?.filename, let c = Servers.chapters else { return }
+            let at = engine.position
+            Task {
+                guard let info = try? await c.followInfo(filename: name), info.growing else { return }
+                DebugLog.log("rec", "端まで来たがまだ録画中 → 追いかけ再生へ \(Int(at))s")
+                engine.playFollowing(start: max(at - 1, 0), duration: info.duration) { c.followURL(filename: name, t: $0) }
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
             // 背面・PiP ではハードウェアのエンコーダーが使えないので、それまでの分で保存する
             if engine.isRecordingClip { toggleClip() }
@@ -194,13 +204,15 @@ struct RecordedPlayerView: View {
             }
             tsSource = src
             // 録画中（まだ書き足されている）なら、伸びる分も追いかけて流してもらう方式で開く
-            if recorded.isRecording == true, let name = file.filename, let c = Servers.chapters {
+            if mayBeRecording, let name = file.filename, let c = Servers.chapters {
                 directPending = false
                 let at = saved ?? 0
                 resumeAt = nil
                 startTask = Task {
                     let info = try? await c.followInfo(filename: name)
                     guard !Task.isCancelled else { return }        // 待っている間に閉じた
+                    DebugLog.log("rec", "録画中かを確認: isRecording=\(recorded.isRecording.map(String.init) ?? "nil") "
+                                 + (info.map { "growing=\($0.growing) 録れている分 \(Int($0.duration))s" } ?? "chapterd の /follow に届かない（follow.py が無い？）"))
                     if let info, info.growing {
                         DebugLog.log("rec", "録画中の録画を追いかけて再生 \(name) 録れている分 \(Int(info.duration))s")
                         engine.playFollowing(start: min(at, max(info.duration - 3, 0)), duration: info.duration) {
@@ -220,9 +232,15 @@ struct RecordedPlayerView: View {
 
     // MARK: - 録画中の録画（追いかけ再生）
 
+    /// 録画中かもしれない（一覧を読んだあとに録画が始まった・一覧が古い場合もあるので、番組の終わりの時刻でも判断する）。
+    /// 本当に書き足されているかは chapterd に聞いて決める
+    private var mayBeRecording: Bool {
+        recorded.isRecording == true || Date().timeIntervalSince1970 * 1000 < Double(recorded.endAt) + 60_000
+    }
+
     /// 録画中の録画で、いま録れている長さを 5 秒おきに聞く。録画が終わったら止める
     private func pollFollow() async {
-        guard recorded.isRecording == true, let name = file?.filename, let c = Servers.chapters else { return }
+        guard mayBeRecording, let name = file?.filename, let c = Servers.chapters else { return }
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 5_000_000_000)
             guard engine.isFollowing, let info = try? await c.followInfo(filename: name) else { continue }

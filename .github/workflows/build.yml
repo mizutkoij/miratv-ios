@@ -23,14 +23,15 @@ jobs:
       - name: Build (iOS device, unsigned) -- also catches Swift compile errors
         run: |
           set -o pipefail
+          # Release: Swift を最適化する（Debug だと毎フレーム動く処理が重く、電池・発熱・カクつきに効く）
           xcodebuild build \
-            -project MiraTV.xcodeproj -scheme MiraTV \
+            -project MiraTV.xcodeproj -scheme MiraTV -configuration Release \
             -destination 'generic/platform=iOS' \
             -derivedDataPath dd -clonedSourcePackagesDirPath SourcePackages \
             CODE_SIGNING_ALLOWED=NO 2>&1 | tee build.log | tail -n 150
       - name: Package unsigned ipa
         run: |
-          mkdir -p Payload && cp -R dd/Build/Products/Debug-iphoneos/MiraTV.app Payload/
+          mkdir -p Payload && cp -R dd/Build/Products/Release-iphoneos/MiraTV.app Payload/
           zip -qr MiraTV-unsigned.ipa Payload
       - uses: actions/upload-artifact@v4
         with:
