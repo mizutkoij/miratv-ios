@@ -20,6 +20,8 @@ struct ChannelListView: View {
     private let ticker = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     private static let bands = ["GR", "BS", "CS"]
+    /// 2 台目で、これ以内に始まる予定があれば「配信あり」として出す
+    private static let upcomingHours = 3.0
 
     @AppStorage("showInactiveChannels") private var showInactive = false
     @AppStorage("epgstationURL") private var epgURL = Defaults.epgstationURL
@@ -58,6 +60,8 @@ struct ChannelListView: View {
         return services
             // EPGStation の概要は 1 台目の局だけ。2 台目は EPGStation に載らない局が多いので全部出す
             .filter { $0.isTV && bandOf($0) == band && (showAll || onSecond || epg.isActive($0)) }
+            // 2 台目: 放送・配信がない局（数時間以内の予定もない局）は隠す。設定の「放送のない局も表示」で全部出せる
+            .filter { !(onSecond && !showAll && epg.hasNoBroadcast($0, at: now, within: Self.upcomingHours)) }
             .sorted { ($0.remoteControlKeyId ?? 99, $0.serviceId) < ($1.remoteControlKeyId ?? 99, $1.serviceId) }
     }
 
@@ -115,6 +119,11 @@ struct ChannelListView: View {
             }
         }
         .task(id: serverURL) { await load() }
+        // 2 台目は、隠す局を決めるために全局の番組表を先に取る（最初の 1 回で全局ぶんが届き、残りは覚えた分を使う）
+        .task(id: onSecond ? services.count : -1) {
+            guard onSecond, let client else { return }
+            for s in services where s.isTV { await epg.loadViaMirakurun(s, client: client) }
+        }
         .onChange(of: onSecond) { _, _ in if !bands.contains(band) { band = bands[0] } }
         .task(id: epgURL) { await epg.refreshOverview(es: Servers.epgstation, force: true) }
         .onReceive(ticker) { t in

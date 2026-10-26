@@ -266,6 +266,14 @@ final class EPGStore: ObservableObject {
         return Array(list.prefix(limit))
     }
 
+    /// 2 台目用: 番組表は取れているが、いま放送中の番組も hours 時間以内に始まる予定もない局か。
+    /// 番組表が取れていない局は false（隠さない）
+    func hasNoBroadcast(_ service: MirakurunService, at now: Date, within hours: Double) -> Bool {
+        guard let d = detail[service.id] else { return false }
+        let limit = now.addingTimeInterval(hours * 3600)
+        return !d.contains { $0.end > now && $0.start <= limit }
+    }
+
     /// 一覧に出す局か: EPGStation の概要が取れていればそれに載った局だけ。取れていなければ全部
     func isActive(_ service: MirakurunService) -> Bool {
         activeChannelIDs?.contains(service.id) ?? true
