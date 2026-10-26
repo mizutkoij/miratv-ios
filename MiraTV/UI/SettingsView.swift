@@ -22,7 +22,7 @@ struct SettingsView: View {
     @AppStorage("timeshiftEnabled") private var timeshiftEnabled = true
     @AppStorage("liveActivity") private var liveActivity = true
     @AppStorage("surround51") private var surround51 = true
-    @AppStorage("autoAudioOnly") private var autoAudioOnly = true
+    @AppStorage("autoAudioOnly") private var autoAudioOnly = false
 
     @EnvironmentObject private var epg: EPGStore
 

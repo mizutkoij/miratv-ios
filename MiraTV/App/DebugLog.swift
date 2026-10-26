@@ -4,7 +4,7 @@ import UIKit
 /// 実機の不具合調査用ログ。1 秒ごとに homeserver の chapterd（POST /log）へまとめて送る。
 /// 設定の「デバッグログを送る」で止められる。パスワード類は扱っていない
 enum DebugLog {
-    static let build = "ci65"
+    static let build = "ci66"
     private static let lock = NSLock()
     private static var buffer: [String] = []
     private static var timer: Timer?

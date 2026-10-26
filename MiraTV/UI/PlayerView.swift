@@ -38,7 +38,7 @@ struct PlayerView: View {
     /// 追っかけ再生を速めに流してライブに追いつく倍率（nil = 等速）
     @State private var tsCatchUp: Double?
     /// 回線が細いときに自動で音声のみへ（データ切れが 1 分に 3 回）
-    @AppStorage("autoAudioOnly") private var autoAudioOnly = true
+    @AppStorage("autoAudioOnly") private var autoAudioOnly = false
     @State private var recentStalls: [Date] = []
     @AppStorage("autoLowDataOnCellular") private var autoLowData = false
     /// 変換配信（EPGStation の ffmpeg）を使うか。既定はオフ＝サーバーに変換の負荷をかけない
