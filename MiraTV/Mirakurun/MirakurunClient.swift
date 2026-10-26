@@ -59,6 +59,13 @@ struct MirakurunClient {
         return c.url!
     }
 
+    /// 配信系（J-Sports・虎テレ）を back 秒ぶん過去から流す。ブリッジが ?back= を見て、CDN に残っている過去のセグメントから流し始める
+    func streamURL(for service: MirakurunService, back: Int) -> URL {
+        var c = URLComponents(url: streamURL(for: service), resolvingAgainstBaseURL: false)!
+        c.queryItems = (c.queryItems ?? []) + [URLQueryItem(name: "back", value: String(back))]
+        return c.url!
+    }
+
     /// 局ロゴ（PNG）。放送ロゴは白地・透過が多いので LogoTile の明るい枠に載せる
     func logoURL(for service: MirakurunService) -> URL {
         baseURL.appending(path: "api/services/\(service.id)/logo")

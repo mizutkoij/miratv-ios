@@ -244,6 +244,12 @@ struct PlayerView: View {
             // 見ている間は 5 秒おきに start を呼ぶ（貯め続ける合図。止めると 3 分で streamd が止まる）
             tsInfo = nil                       // 前の局のバッファの範囲を出さない
             guard tsAvailable else { return }
+            if let w = bridgeWindow {
+                // ブリッジの ?back= で戻る局: 貯めるものは無い。「いまから w 秒前まで」を最初から範囲として出す（ライブの端は時間とともに進む）
+                tsInfo = TimeshiftInfo(id: nil, bytes: 0, seconds: w, availableFrom: 0, stopped: false)
+                tsInfoAt = Date()
+                return
+            }
             let svc = current
             while !Task.isCancelled {
                 if let info = await TimeshiftClient.start(svc), !Task.isCancelled {
@@ -548,7 +554,19 @@ struct PlayerView: View {
     // MARK: - 追っかけ再生
 
     /// 追っかけを使えるか（設定がオン・streamd がある・原画質で見ている）。2 台目の配信系（networkId 40000 以降）は streamd が 2 台目から取る
-    private var tsAvailable: Bool { timeshiftEnabled && modeID == -1 && (viaPrimary || current.networkId >= 40000) && Servers.streamd != nil }
+    private var tsAvailable: Bool {
+        timeshiftEnabled && modeID == -1
+            && (bridgeWindow != nil || ((viaPrimary || current.networkId >= 40000) && Servers.streamd != nil))
+    }
+
+    /// 2 台目の配信系で、ブリッジの ?back=（CDN に残っている過去のセグメントから流す）で戻れる局の、戻れる長さ（秒）。
+    /// streamd の「見始めてから」ではなく、見始める前にさかのぼれる。J-Sports は約 20 時間、虎テレは約 17 時間ぶん CDN にある
+    private var bridgeWindow: Double? {
+        guard current.networkId >= 40000, !viaPrimary else { return nil }
+        if current.name.hasPrefix("J-Sports") { return 3 * 3600 }
+        if current.name.hasPrefix("虎テレ"), !current.name.contains("球場音のみ") { return 3 * 3600 }
+        return nil
+    }
 
     /// ライブの端（バッファ開始からの秒）。info は 5 秒おきなので、その間は経過時間で進める
     private var liveEdge: Double {
@@ -565,7 +583,14 @@ struct PlayerView: View {
     @discardableResult
     private func openTimeshift(at t: Double, paused: Bool = false) -> Bool {
         let target = clampTS(t)
-        guard let info = tsInfo, let url = Servers.timeshiftURL(current, "play", from: target, bufferID: info.id) else { return false }
+        let url: URL
+        if bridgeWindow != nil {
+            guard tsInfo != nil else { return false }
+            url = client.streamURL(for: current, back: max(Int((liveEdge - target).rounded()), 1))
+        } else {
+            guard let info = tsInfo, let u = Servers.timeshiftURL(current, "play", from: target, bufferID: info.id) else { return false }
+            url = u
+        }
         livePaused = false
         DebugLog.log("player", "追っかけ再生 \(Int(target))s（ライブの \(Int(liveEdge - target))s 前）")
         tsActive = true

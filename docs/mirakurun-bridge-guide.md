@@ -189,3 +189,13 @@ Open decision: order = follow ABEMA's `order`, or keep the owner's manual order 
 `/v1/media` channels carry `broadcastRegionPolicy` (47 channels = 1, 9 = 0: abema-special, special-plus, anime-live, anime-live2, k-world, mahjong, shogi, fighting-sports, boatrace). Its exact meaning is **not documented/verified**
 (an earlier note called it a region restriction -- that was a guess). From homeserver in Japan, 4 of 5 policy-0 channels played fine via streamlink (boatrace, k-world, mahjong, fighting-sports); shogi gave no data in 30 s (off air or other reason, unverified).
 The registry does not use this flag.
+
+## 16. FOD channels made consecutive again; NHK Plus moved (2026-10-26)
+- Owner requirement: the FOD Live channels must be consecutive. After the section 14 guard, FOD Live Ch 01-03 had been pushed to sids 1068-1070 while 04-08 sat at 225-229, and 09 / 22 were at 954 / 230.
+- Original layout (numbers `400 + sid`): FOD 01-08 = sids 222-229 (numbers 622-629), then 230; NHK Plus had taken over 222-224 when it was re-added. Chosen fix: restore FOD, move NHK Plus.
+- Done with the bridge stopped (no recordings): `state.json` backup `state.json.bak-pre-fodswap-<ts>`; `uuid_to_sid` and `sid_to_uuid` edited for 9 keys:
+  `fod-live-01/02/03` -> 222/223/224, `fod-live-09` -> 230, `fod-live-22` -> 954, `nhkplus-g1/e1/s1` -> 1068/1069/1070 (numbers 1468-1470).
+  Result [verified]: FOD Live Ch 01-09 = serviceIds 222-230 consecutive, Ch 22 = 954, NHK Plus 1068-1070, 961 services, 0 duplicated ids.
+- EPGStation rule 13 (disabled: `reserveOption.enable=false`) pointed at the NHK Plus ids 4000000222-224; updated to 4000001068-1070 so it keeps meaning "NHK Plus + TVer simul + 4000000173". Original JSON saved as `fod-live/rule13-backup-<ts>.json`.
+- Nothing else referenced the FOD ids (no recordings/reserves/rules). MiraTV: anything cached by the old NHK Plus ids (4000000222-224) now sees FOD, and the NHK Plus services are 4000001068-1070.
+- To keep a family contiguous in the future, new channels get `next_sid` (end of the range); the family-ordered list (`virtualFamilyRank`) keeps them together in `/api/services` and on the top page, but sids/numbers stay registration-ordered.
