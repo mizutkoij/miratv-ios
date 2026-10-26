@@ -43,6 +43,14 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MIRAKURUN = os.environ.get("MIRAKURUN", "http://127.0.0.1:40772").rstrip("/")
+# 2 台目（korean-tv-bridge。配信・海外の局）。サービス ID（= networkId*100000+serviceId）が 4,000,000,000 以上ならこちらから取る
+MIRAKURUN2 = os.environ.get("MIRAKURUN2", "http://127.0.0.1:36196").rstrip("/")
+
+def upstream(sid):
+    try:
+        return MIRAKURUN2 if int(sid) >= 4_000_000_000 else MIRAKURUN
+    except (TypeError, ValueError):
+        return MIRAKURUN
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "23236"))
 CHUNK = 188 * 512
@@ -108,7 +116,7 @@ class Timeshift:
         return os.path.join(self.dir, f"{k:06d}.ts")
 
     def _run(self):
-        src = f"{MIRAKURUN}/api/services/{self.sid}/stream?decode=1"
+        src = f"{upstream(self.sid)}/api/services/{self.sid}/stream?decode=1"
         req = urllib.request.Request(src, headers={"X-Mirakurun-Priority": "0", "User-Agent": "miratv-streamd/timeshift"})
         f = None
         k = -1
@@ -467,7 +475,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._probe(parts[1], q)
         keep_video = q.get("video", ["1"])[0] != "0"
         keep_data = q.get("data", ["0"])[0] == "1"
-        src = f"{MIRAKURUN}/api/services/{parts[1]}/stream?decode=1"
+        src = f"{upstream(parts[1])}/api/services/{parts[1]}/stream?decode=1"
         req = urllib.request.Request(src, headers={"X-Mirakurun-Priority": "0", "User-Agent": "miratv-streamd"})
         try:
             upstream = urllib.request.urlopen(req, timeout=15)
@@ -519,7 +527,7 @@ class Handler(BaseHTTPRequestHandler):
         if not math.isfinite(seconds):
             seconds = 10
         seconds = min(max(seconds, 2), 60)
-        src = f"{MIRAKURUN}/api/services/{sid}/stream?decode=1"
+        src = f"{upstream(sid)}/api/services/{sid}/stream?decode=1"
         req = urllib.request.Request(src, headers={"X-Mirakurun-Priority": "0", "User-Agent": "miratv-streamd"})
         global viewers
         f = Filter(True, True)

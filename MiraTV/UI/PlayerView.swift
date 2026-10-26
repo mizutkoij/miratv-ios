@@ -547,8 +547,8 @@ struct PlayerView: View {
 
     // MARK: - 追っかけ再生
 
-    /// 追っかけを使えるか（設定がオン・streamd がある・原画質で見ている）
-    private var tsAvailable: Bool { timeshiftEnabled && modeID == -1 && viaPrimary && Servers.streamd != nil }
+    /// 追っかけを使えるか（設定がオン・streamd がある・原画質で見ている）。2 台目の配信系（networkId 40000 以降）は streamd が 2 台目から取る
+    private var tsAvailable: Bool { timeshiftEnabled && modeID == -1 && (viaPrimary || current.networkId >= 40000) && Servers.streamd != nil }
 
     /// ライブの端（バッファ開始からの秒）。info は 5 秒おきなので、その間は経過時間で進める
     private var liveEdge: Double {

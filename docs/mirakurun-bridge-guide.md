@@ -174,3 +174,18 @@ Open decision: order = follow ABEMA's `order`, or keep the owner's manual order 
   arrives automatically (virtual-epg-fetcher already emitted events for every ABEMA channelSchedule; fishing 98 programs, boatrace 13; disney has no schedule).
 - Not covered: ABEMA Event slots (`abema-event-NN`, separate slot mechanism), and other families with changing channel sets (FOD, DAZN, ...) -- same registry pattern can be reused.
 - Still unverified: EPGStation-korea behavior when a channel vanishes (here harmless: no data on the two removed channels).
+
+## 14. Duplicate service ids: NHK Plus shown under "FOD Live Ch 01-03" (fixed 2026-10-26)
+- Symptom (EPGStation-korea guide `:8890/#/guide`): NHK Plus programs listed under FOD 1-3. The bridge EPG itself was right (fod-live-01..03 had 0 events, nhkplus-g1/e1/s1 had 432/439/216).
+- Cause: `state.json` mapped **two vids to the same sid** for three pairs: `fod-live-01/02/03` and `nhkplus-g1/e1/s1` (sids 222/223/224, i.e. ids 4000000222-224). `/api/services` therefore listed two services with the same id;
+  EPGStation keys channels by id, so one overwrote the other (name "FOD Live Ch 0x" with NHK Plus programs). The pairs most likely date from re-adding NHK Plus on 10/21 with old sids still in the file (not proven).
+- Which side keeps the id: EPGStation rule 13 (weekly rule) targets channel ids 4000000222-224 plus the TVer simul ids 4000000739-743 and 4000000173 -> those ids are the NHK Plus ones. No recordings/reserves existed on the duplicated ids.
+- Fix: duplicate-sid guard in `getAllChannels()` (backup `server.mjs.bak-pre-sidguard-<ts>`, `state.json.bak-pre-sidguard-<ts>`): channels are processed in the deterministic sort order; if a sid is already owned, the later channel gets a fresh sid and the bridge logs `sid collision: ...`.
+  Because `virtualFamilyRank` puts NHK Plus (21) before FOD (30), FOD Live Ch 01-03 moved to sids 1068/1069/1070 (ids 4000001068-1070, numbers 1468-1470); NHK Plus kept 222-224. [verified: 961 services, 0 duplicated ids]
+- Side effect to remember: anything pointing at FOD Live Ch 01-03 by the old ids (4000000222-224) now points at NHK Plus. Nothing did at the time (no reserves/rules/recordings on them).
+- Check for the future: `python3 -c` over `state.json` `uuid_to_sid` for sids shared by more than one key, or grep `sid collision` in `bridge.log`.
+
+## 15. About the ABEMA `broadcastRegionPolicy` flag
+`/v1/media` channels carry `broadcastRegionPolicy` (47 channels = 1, 9 = 0: abema-special, special-plus, anime-live, anime-live2, k-world, mahjong, shogi, fighting-sports, boatrace). Its exact meaning is **not documented/verified**
+(an earlier note called it a region restriction -- that was a guess). From homeserver in Japan, 4 of 5 policy-0 channels played fine via streamlink (boatrace, k-world, mahjong, fighting-sports); shogi gave no data in 30 s (off air or other reason, unverified).
+The registry does not use this flag.
