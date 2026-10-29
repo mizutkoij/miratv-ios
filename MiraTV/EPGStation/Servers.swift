@@ -9,6 +9,25 @@ enum Servers {
 
     static var mirakurun: MirakurunClient? { MirakurunClient(string("mirakurunURL", Defaults.mirakurunURL)) }
     static var epgstation: EPGStationClient? { EPGStationClient(string("epgstationURL", Defaults.epgstationURL)) }
+    static var epgstation2: EPGStationClient? { EPGStationClient(string("epgstation2URL", Defaults.epgstation2URL)) }
+
+    /// いま見ているのが 2 台目の Mirakurun か（チャンネル画面のスイッチと同じ条件）
+    static var onSecondServer: Bool {
+        let u2 = string("mirakurun2URL", Defaults.mirakurun2URL).trimmingCharacters(in: .whitespacesAndNewlines)
+        return !u2.isEmpty && UserDefaults.standard.integer(forKey: "mirakurunActive") == 1
+    }
+
+    /// 番組表に使う EPGStation（2 台目を見ているときは 2 台目の EPGStation）
+    static var epgstationForGuide: EPGStationClient? { onSecondServer ? epgstation2 : epgstation }
+
+    /// 番組表の局ロゴ。2 台目は EPGStation にロゴが無いので、Mirakurun 2 のロゴを使う
+    static func guideLogoURL(channelId: Int) -> URL? {
+        if SecondBand.isSecond(channelId: channelId) {
+            return MirakurunClient(string("mirakurun2URL", Defaults.mirakurun2URL))?
+                .baseURL.appending(path: "api/services/\(channelId)/logo")
+        }
+        return epgstation?.logoURL(channelId: channelId)
+    }
 
     static var chapters: ChapterClient? { ChapterClient(string("chapterURL", Defaults.chapterURL)) }
 

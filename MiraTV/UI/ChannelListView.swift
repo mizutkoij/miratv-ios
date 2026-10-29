@@ -30,17 +30,9 @@ struct ChannelListView: View {
 
     /// 2 台目の Mirakurun は、放送波の枠（GR/BS/CS）に配信・海外の局を割り当てているだけなので、局名で種類を分ける。
     /// 例: 地上波枠 = ABEMA、BS 枠 = MLB・各種配信、CS 枠 = 韓国の放送・DAZN
-    private static let secondBands = ["ABEMA", "MLB", "配信", "DAZN", "韓国", "他"]
+    private static let secondBands = SecondBand.all
 
-    private func secondBandOf(_ s: MirakurunService) -> String {
-        let n = s.name
-        if n.hasPrefix("ABEMA") || s.channel?.type == "GR" { return "ABEMA" }
-        if n.hasPrefix("MLB") { return "MLB" }
-        if n.hasPrefix("DAZN") { return "DAZN" }
-        if n.hasPrefix("QAM/") || n.hasPrefix("{") { return "他" }
-        if s.channel?.type == "CS" { return "韓国" }
-        return "配信"   // BS 枠: FOD / U-NEXT / Hulu / J-Sports / EasySports / 虎テレ / GIANTS TV / NHK World など
-    }
+    private func secondBandOf(_ s: MirakurunService) -> String { SecondBand.of(name: s.name, type: s.channel?.type) }
 
     private var bands: [String] { onSecond ? Self.secondBands : Self.bands }
 

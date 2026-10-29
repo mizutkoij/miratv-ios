@@ -191,13 +191,15 @@ final class UsenetCatalog: ObservableObject {
         var offset = mode == .resume ? raw.count : 0
         var total: Int?
         var nextPublish = 2_000
-        let pageSize = 1_000
+        // 差分は小さいページから（サーバーは 1000 件で 10〜20 秒かかる。新しい分は普通は数十件）。届かなければ広げる
+        var pageSize = mode == .incremental ? 50 : 1_000
         progressDone = offset
         progressTotal = serverTotal
         let started = Date()
         do {
             while true {
                 let page = try await client.items(limit: pageSize, offset: offset)
+                if mode == .incremental { pageSize = min(pageSize * 4, 1_000) }
                 if let t = page.total { total = t; progressTotal = t }
                 if page.items.isEmpty { break }
                 var hitKnown = false
@@ -244,7 +246,8 @@ final class UsenetCatalog: ObservableObject {
         await rebuild()
         save()
         DebugLog.log("nzb", "一覧を取得（\(mode.rawValue)）\(fetched.count) 件 \(String(format: "%.1f", Date().timeIntervalSince(started))) 秒 → 計 \(raw.count) 件")
-        if let total, raw.count != total { return true }
+        // 無効にした・消した数件のずれで全件（約 47 万件・1 時間以上）を取り直さない。大きくずれたときだけ
+        if let total, abs(raw.count - total) > max(200, total / 500) { return true }
         return false
     }
 

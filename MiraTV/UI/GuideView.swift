@@ -11,7 +11,13 @@ struct GuideSelection: Identifiable {
 /// データは EPGStation の `/api/schedules`（放送波と日付ごとに 24 時間ぶん）
 struct GuideView: View {
     @AppStorage("epgstationURL") private var epgURL = Defaults.epgstationURL
+    @AppStorage("epgstation2URL") private var epg2URL = Defaults.epgstation2URL
+    @AppStorage("mirakurun2URL") private var url2 = Defaults.mirakurun2URL
+    @AppStorage("mirakurunActive") private var activeServer = 0
+    @AppStorage("showInactiveChannels") private var showInactive = false
     @EnvironmentObject private var reserves: ReserveStore
+    /// 2 台目の Mirakurun を見ている（番組表は 2 台目の EPGStation）
+    private var onSecond: Bool { !url2.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && activeServer == 1 }
 
     @State private var band = "GR"
     @State private var showSearch = false
@@ -22,6 +28,7 @@ struct GuideView: View {
 
     /// 画面に出す順。系列順は地上波だけ（BS・CS はリモコン番号順のまま）
     private var displayColumns: [ESSchedule] {
+        if onSecond { return secondColumns }
         guard guideOrder == "affiliation", band == "GR" else { return columns }
         return columns.enumerated().sorted { a, b in
             let ra = JikkyoChannel.affiliationRank(name: a.element.channel.name) ?? 99
@@ -40,6 +47,22 @@ struct GuideView: View {
     private let ticker = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     private static let bands = ["GR", "BS", "CS"]
+    private var bands: [String] { onSecond ? SecondBand.all : Self.bands }
+
+    /// 2 台目: 種類（ABEMA・MLB・配信…）で絞り、表示中の日に番組がない局と、
+    /// 今日なら数時間以内に配信の予定もない局は隠す（設定の「放送していない局も一覧に出す」で全部出せる）
+    private var secondColumns: [ESSchedule] {
+        let from = Int64(now.timeIntervalSince1970 * 1000)
+        let to = from + 3 * 3_600_000
+        return columns.filter { s in
+            guard SecondBand.of(name: s.channel.name, type: s.channel.channelType) == band else { return false }
+            if showInactive { return true }
+            let list = visiblePrograms(s)
+            if list.isEmpty { return false }
+            if dayOffset == 0 { return list.contains { $0.endAt > from && $0.startAt <= to } }
+            return true
+        }
+    }
     private var ppm: CGFloat { Theme.guidePointsPerMinute }
     private var totalHeight: CGFloat { 24 * 60 * ppm }
 
@@ -60,7 +83,10 @@ struct GuideView: View {
 
     private var windowStart: Date { dayStart(dayOffset) }
 
-    private func cacheKey(_ offset: Int) -> String { "\(band)-\(Int(dayStart(offset).timeIntervalSince1970))" }
+    /// 2 台目は全局を 1 回で取って手元で種類ごとに分けるので、種類ではなく "k" で分ける
+    private func cacheKey(_ offset: Int) -> String {
+        "\(onSecond ? "k" : band)-\(Int(dayStart(offset).timeIntervalSince1970))"
+    }
 
     private func bandLabel(_ b: String) -> String { b == "GR" ? "地上波" : b }
 
@@ -87,7 +113,7 @@ struct GuideView: View {
                             .accessibilityLabel("番組を探す")
                         Menu {
                             Picker("放送波", selection: $band) {
-                                ForEach(Self.bands, id: \.self) { Text(bandLabel($0)).tag($0) }
+                                ForEach(bands, id: \.self) { Text(bandLabel($0)).tag($0) }
                             }
                             Picker("並び順", selection: $guideOrder) {
                                 Text("リモコン番号順").tag("remote")
@@ -131,7 +157,11 @@ struct GuideView: View {
             }
         }
         .sheet(isPresented: $showSearch) { ProgramSearchSheet().environmentObject(reserves) }
-        .task(id: "\(band)-\(dayOffset)-\(epgURL)") {
+        .onChange(of: activeServer) { _, _ in
+            columns = []; loadedDay = nil
+            if !bands.contains(band) { band = bands[0] }
+        }
+        .task(id: "\(onSecond ? "k" : band)-\(dayOffset)-\(onSecond ? epg2URL : epgURL)") {
             await load()
             await reserves.refresh()
             await prefetchOtherDays()      // 予約の印を先に出してから、残りの日を裏で取る
@@ -175,7 +205,7 @@ struct GuideView: View {
             Color.clear.frame(width: Theme.guideTimeColumnWidth, height: 44)
             ForEach(displayColumns, id: \.channel.id) { s in
                 HStack(spacing: 6) {
-                    LogoTile(url: Servers.epgstation?.logoURL(channelId: s.channel.id), size: Theme.Logo.guide)
+                    LogoTile(url: Servers.guideLogoURL(channelId: s.channel.id), size: Theme.Logo.guide)
                     VStack(alignment: .leading, spacing: 0) {
                         Text(s.channel.remoteControlKeyId.map(String.init) ?? "")
                             .font(Theme.F.mono(12)).foregroundStyle(Theme.C.accent)
@@ -279,7 +309,7 @@ struct GuideView: View {
         let start = dayStart(offset)
         let key = cacheKey(offset)
         let list = Self.sorted(try await es.schedules(from: start, to: start.addingTimeInterval(86400),
-                                                      types: band == "CS" ? ["CS", "SKY"] : [band],
+                                                      types: onSecond ? ["GR", "BS", "CS"] : (band == "CS" ? ["CS", "SKY"] : [band]),
                                                       cacheKey: "guide-" + key))
         cache[key] = list
         return list
@@ -288,7 +318,7 @@ struct GuideView: View {
     /// 表示中の日が出たら、残りの日も 1 日ずつ裏で取っておく（日付を切り替えたときに待たないように）。
     /// 端末に 1 時間以内の分があれば取らない。日付や放送波を切り替えると task ごと止まる
     private func prefetchOtherDays() async {
-        guard let es = Servers.epgstation else { return }
+        guard let es = Servers.epgstationForGuide else { return }
         for offset in Self.dayOffsets where offset != dayOffset {
             if Task.isCancelled { return }
             let key = cacheKey(offset)
@@ -328,7 +358,7 @@ struct GuideView: View {
         }
         // 過去の日: サーバーは終わった番組を消していくので、端末に残っている分（その日に見たときのもの）を優先する
         if dayOffset < 0, showingStale { cache[key] = columns; return }
-        guard let es = Servers.epgstation else { errorText = "EPGStation の URL が設定されていません"; return }
+        guard let es = Servers.epgstationForGuide else { errorText = "EPGStation の URL が設定されていません"; return }
         loading = true
         defer { loading = false }
         do {
@@ -353,6 +383,8 @@ struct ProgramDetailSheet: View {
 
     private var program: Program { selection.program }
     private var reserve: ESReserve? { reserves.reserve(forProgram: program.id) }
+    /// 2 台目の番組表の番組（予約・録画は 1 台目の EPGStation だけなので、ここからは予約しない）
+    private var fromSecond: Bool { SecondBand.isSecond(channelId: selection.channel.id) }
     private var isPast: Bool { program.end < Date() }
 
     private var dateText: String {
@@ -368,7 +400,7 @@ struct ProgramDetailSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: 10) {
-                        LogoTile(url: Servers.epgstation?.logoURL(channelId: selection.channel.id), size: Theme.Logo.card)
+                        LogoTile(url: Servers.guideLogoURL(channelId: selection.channel.id), size: Theme.Logo.card)
                         Text(selection.channel.remoteControlKeyId.map(String.init) ?? "")
                             .font(Theme.F.mono(15)).foregroundStyle(Theme.C.accent)
                         Text(selection.channel.name).font(Theme.F.jp(15, .bold)).foregroundStyle(Theme.C.text)
@@ -451,17 +483,18 @@ struct ProgramDetailSheet: View {
                 .disabled(reserves.busy)
             } else {
                 Button { Task { message = await reserves.add(programId: program.id) } } label: {
-                    Text(isPast ? "終了した番組です" : "録画予約").font(Theme.F.jp(16, .bold)).foregroundStyle(Theme.C.onRec)
+                    Text(fromSecond ? "2 台目の番組は予約できません" : (isPast ? "終了した番組です" : "録画予約")).font(Theme.F.jp(16, .bold)).foregroundStyle(Theme.C.onRec)
                         .frame(maxWidth: .infinity, minHeight: 52)
                         .background(Theme.C.rec, in: RoundedRectangle(cornerRadius: Theme.R.card))
-                        .opacity(isPast ? 0.4 : 1)
+                        .opacity(isPast || fromSecond ? 0.4 : 1)
                 }
                 .buttonStyle(.plain)
-                .disabled(isPast || reserves.busy)
+                .disabled(isPast || fromSecond || reserves.busy)
             }
             HStack(spacing: 10) {
-                Button { showRule = true } label: { secondaryLabel("毎週録画ルール", enabled: true) }
+                Button { showRule = true } label: { secondaryLabel("毎週録画ルール", enabled: !fromSecond) }
                     .buttonStyle(.plain)
+                    .disabled(fromSecond)
                 secondaryLabel("録画オプション", enabled: false)
             }
         }
