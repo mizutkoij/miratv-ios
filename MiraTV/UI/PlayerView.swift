@@ -27,6 +27,8 @@ struct PlayerView: View {
     // MARK: 追っかけ再生（streamd が直近の放送をディスクに貯めている）
     @AppStorage("timeshiftEnabled") private var timeshiftEnabled = true
     @State private var tsInfo: TimeshiftInfo?
+    /// 見ている局をいま EPGStation が録画していれば、その録画ファイル（番組の頭から録れている）で巻き戻す
+    @State private var recName: String?
     @State private var tsInfoAt = Date()
     /// いま追っかけ再生中か（false = 普通のライブ）
     @State private var tsActive = false
@@ -240,8 +242,9 @@ struct PlayerView: View {
             }
             startPlayback()
         }
-        .task(id: "\(current.id)-\(tsAvailable)") {
+        .task(id: "\(current.id)-\(tsAvailable)-\(useRecording)") {
             // 見ている間は 5 秒おきに start を呼ぶ（貯め続ける合図。止めると 3 分で streamd が止まる）
+            guard !useRecording else { return }   // 録画ファイルで巻き戻すときは、そちらが tsInfo を持つ
             tsInfo = nil                       // 前の局のバッファの範囲を出さない
             guard tsAvailable else { return }
             if let w = bridgeWindow {
@@ -261,6 +264,36 @@ struct PlayerView: View {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
             TimeshiftClient.stop(svc)          // 局を替えた・閉じた・追っかけを使わなくなった
+        }
+        .task(id: "rec-\(current.id)-\(timeshiftEnabled)-\(modeID == -1)") {
+            // 見ている局をいま録画しているか（EPGStation の /api/recording）を 10 秒おきに見て、録画ファイルの長さを巻き戻しの範囲にする
+            recName = nil
+            guard timeshiftEnabled, modeID == -1, let c = Servers.chapters else { return }
+            let svc = current
+            let es: EPGStationClient? = viaPrimary ? Servers.epgstation : Servers.epgstation2
+            while !Task.isCancelled {
+                if !tsActive {                 // 巻き戻し中は、いまの録画ファイルのまま
+                    var found: String?
+                    var dur: Double = 0
+                    if let es, let list = try? await es.recording(),
+                       let r = list.first(where: { $0.channelId == svc.id && $0.isRecording == true }),
+                       let name = r.videoFiles?.first(where: { $0.type != "encoded" })?.filename,
+                       let info = try? await c.followInfo(filename: name), info.growing, info.duration > 5 {
+                        found = name; dur = info.duration
+                    }
+                    if Task.isCancelled { return }
+                    if let found {
+                        if recName != found { DebugLog.log("player", "録画中の録画で巻き戻せます: \(found) \(Int(dur))s") }
+                        recName = found
+                        tsInfo = TimeshiftInfo(id: nil, bytes: 0, seconds: dur, availableFrom: 0, stopped: false)
+                        tsInfoAt = Date()
+                    } else if recName != nil {
+                        recName = nil
+                        tsInfo = nil           // 録画が終わった → streamd 等の方式に戻る（task が作り直される）
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+            }
         }
         .task(id: "\(current.id)-\(commentsOn)-\(livePaused)") {
             if commentsOn && !livePaused {
@@ -556,8 +589,11 @@ struct PlayerView: View {
     /// 追っかけを使えるか（設定がオン・streamd がある・原画質で見ている）。2 台目の配信系（networkId 40000 以降）は streamd が 2 台目から取る
     private var tsAvailable: Bool {
         timeshiftEnabled && modeID == -1
-            && (bridgeWindow != nil || ((viaPrimary || current.networkId >= 40000) && Servers.streamd != nil))
+            && (recName != nil || bridgeWindow != nil || ((viaPrimary || current.networkId >= 40000) && Servers.streamd != nil))
     }
+
+    /// 巻き戻しに録画ファイルを使うか（見ている局を録画中のとき。streamd や ?back= より優先: 番組の頭まで戻れる）
+    private var useRecording: Bool { timeshiftEnabled && modeID == -1 && recName != nil }
 
     /// 2 台目の配信系で、ブリッジの ?back=（CDN に残っている過去のセグメントから流す）で戻れる局の、戻れる長さ（秒）。
     /// streamd の「見始めてから」ではなく、見始める前にさかのぼれる。J-Sports は約 20 時間、虎テレは約 17 時間ぶん CDN にある
@@ -584,7 +620,10 @@ struct PlayerView: View {
     private func openTimeshift(at t: Double, paused: Bool = false) -> Bool {
         let target = clampTS(t)
         let url: URL
-        if bridgeWindow != nil {
+        if useRecording, let name = recName, let c = Servers.chapters {
+            guard tsInfo != nil else { return false }
+            url = c.followURL(filename: name, t: target)
+        } else if bridgeWindow != nil {
             guard tsInfo != nil else { return false }
             url = client.streamURL(for: current, back: max(Int((liveEdge - target).rounded()), 1))
         } else {
