@@ -6,6 +6,7 @@ struct RecordingsView: View {
     enum Segment: String, CaseIterable { case reserves = "予約", recorded = "録画済み", rules = "ルール", archive = "アーカイブ" }
 
     @AppStorage("epgstationURL") private var epgURL = Defaults.epgstationURL
+    @AppStorage("epgstation2URL") private var epg2URL = Defaults.epgstation2URL
     @EnvironmentObject private var reserves: ReserveStore
     @EnvironmentObject private var epg: EPGStore
     @EnvironmentObject private var session: PlaybackSession
@@ -14,6 +15,10 @@ struct RecordingsView: View {
     @State private var segment: Segment = .reserves
     @State private var recorded: [ESRecorded] = []
     @State private var recordedTotal = 0
+    /// 2 台目の EPGStation（韓国・配信系）の録画。録画済みの一覧で 1 台目のものと混ぜて出す
+    @State private var recorded2: [ESRecorded] = []
+    @State private var recordedTotal2 = 0
+    @State private var names2: [Int: String] = [:]
     @State private var rules: [ESRule] = []
     @State private var storageText = ""
     @State private var errorText: String?
@@ -24,6 +29,26 @@ struct RecordingsView: View {
     private let ticker = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     private var es: EPGStationClient? { EPGStationClient(epgURL) }
+    private var es2: EPGStationClient? {
+        let s = epg2URL.trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.isEmpty ? nil : EPGStationClient(s)
+    }
+
+    /// 録画済みの一覧の 1 行（どちらの EPGStation のものか）。番号は別々に振られているので、行の ID は組にする
+    private struct RecItem: Identifiable {
+        let rec: ESRecorded
+        let es: EPGStationClient
+        let second: Bool
+        var id: String { "\(second ? 2 : 1)-\(rec.id)" }
+    }
+
+    /// 両方の EPGStation の録画を、開始が新しい順に
+    private var merged: [RecItem] {
+        var out: [RecItem] = []
+        if let es { out += recorded.map { RecItem(rec: $0, es: es, second: false) } }
+        if let es2 { out += recorded2.map { RecItem(rec: $0, es: es2, second: true) } }
+        return out.sorted { $0.rec.startAt > $1.rec.startAt }
+    }
 
     private var statusLine: StatusLine {
         if segment == .archive { return archiveStatus }
@@ -159,15 +184,15 @@ struct RecordingsView: View {
 
     private var recordedRows: some View {
         Group {
-            if recorded.isEmpty && !loading { empty("録画はありません") }
-            ForEach(recorded) { rec in
-                Button { if let es { session.playRecorded(rec, es: es) } } label: { recordedRow(rec) }
+            if recorded.isEmpty && recorded2.isEmpty && !loading { empty("録画はありません") }
+            ForEach(merged) { item in
+                Button { session.playRecorded(item.rec, es: item.es) } label: { recordedRow(item) }
                     .buttonStyle(.plain)
-                    .disabled(rec.videoFiles?.isEmpty ?? true)
+                    .disabled(item.rec.videoFiles?.isEmpty ?? true)
             }
-            if recorded.count < recordedTotal {
+            if recorded.count < recordedTotal || recorded2.count < recordedTotal2 {
                 Button { Task { await loadMoreRecorded() } } label: {
-                    Text("もっと読み込む（\(recorded.count)/\(recordedTotal)）")
+                    Text("もっと読み込む（\(recorded.count + recorded2.count)/\(recordedTotal + recordedTotal2)）")
                         .font(Theme.F.jp(13, .medium)).foregroundStyle(Theme.C.text2)
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }
@@ -176,11 +201,12 @@ struct RecordingsView: View {
         }
     }
 
-    private func recordedRow(_ rec: ESRecorded) -> some View {
+    private func recordedRow(_ item: RecItem) -> some View {
+        let rec = item.rec
         let kind = rec.videoFiles?.first?.type == "encoded" ? "MP4" : "TS"
         return HStack(alignment: .top, spacing: 12) {
             ZStack(alignment: .bottomTrailing) {
-                AsyncImage(url: rec.thumbnails?.first.flatMap { es?.thumbnailURL(id: $0) }) { phase in
+                AsyncImage(url: rec.thumbnails?.first.flatMap { item.es.thumbnailURL(id: $0) }) { phase in
                     if let img = phase.image { img.resizable().scaledToFill() } else { Theme.C.surface }
                 }
                 .frame(width: 136, height: 76)
@@ -204,10 +230,11 @@ struct RecordingsView: View {
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text(rec.name ?? "").font(Theme.F.jp(14, .bold)).foregroundStyle(Theme.C.text).lineLimit(2)
-                Text("\(rec.channelId.map(channelName) ?? "") · \(dateText(rec.start)) \(rec.start.hm)")
+                Text("\(rec.channelId.map { item.second ? (names2[$0] ?? channelName($0)) : channelName($0) } ?? "") · \(dateText(rec.start)) \(rec.start.hm)")
                     .font(Theme.F.caption).foregroundStyle(Theme.C.text3).lineLimit(1)
                 HStack(spacing: 6) {
                     TagView(text: kind)
+                    if item.second { TagView(text: "2台目") }
                     if rec.isRecording == true { Text("● 録画中").font(Theme.F.jp(11, .bold)).foregroundStyle(Theme.C.recText) }
                 }
             }
@@ -299,6 +326,7 @@ struct RecordingsView: View {
                 if force || recorded.isEmpty {
                     let r = try await es.recorded(offset: 0, limit: 30)
                     recorded = r.records; recordedTotal = r.total
+                    await loadSecondRecorded(offset: 0)
                 }
                 errorText = nil
             case .rules:
@@ -313,11 +341,28 @@ struct RecordingsView: View {
     }
 
     private func loadMoreRecorded() async {
-        guard let es else { return }
+        if let es, recorded.count < recordedTotal {
+            do {
+                let r = try await es.recorded(offset: recorded.count, limit: 30)
+                recorded += r.records
+                recordedTotal = r.total
+            } catch { errorText = describeError(error) }
+        }
+        if recorded2.count < recordedTotal2 { await loadSecondRecorded(offset: recorded2.count) }
+    }
+
+    /// 2 台目の EPGStation の録画。つながらなくても 1 台目の一覧は出す
+    private func loadSecondRecorded(offset: Int) async {
+        guard let es2 else { recorded2 = []; recordedTotal2 = 0; return }
         do {
-            let r = try await es.recorded(offset: recorded.count, limit: 30)
-            recorded += r.records
-            recordedTotal = r.total
-        } catch { errorText = describeError(error) }
+            let r = try await es2.recorded(offset: offset, limit: 30)
+            if offset == 0 { recorded2 = r.records } else { recorded2 += r.records }
+            recordedTotal2 = r.total
+            if names2.isEmpty, let chs = try? await es2.channels() {
+                names2 = Dictionary(chs.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+            }
+        } catch {
+            DebugLog.log("net", "2 台目の録画一覧を取得できません: \(describeError(error))")
+        }
     }
 }

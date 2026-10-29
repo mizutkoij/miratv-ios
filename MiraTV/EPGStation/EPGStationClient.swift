@@ -306,6 +306,12 @@ struct EPGStationClient {
         return (recs, r.total ?? recs.count)
     }
 
+    /// 局の一覧（局名を引くため。2 台目の録画は 1 台目の概要に局名が無い）
+    func channels() async throws -> [ESChannel] {
+        let list: [LossyDecodable<ESChannel>] = try await get("api/channels", [:])
+        return list.compactMap(\.value)
+    }
+
     func recordedItem(id: Int) async throws -> ESRecorded {
         try await get("api/recorded/\(id)", ["isHalfWidth": "true"])
     }
