@@ -17,6 +17,9 @@ struct RecordingsView: View {
     @State private var recordedTotal = 0
     /// 2 台目の EPGStation（韓国・配信系）の録画。録画済みの一覧で 1 台目のものと混ぜて出す
     @State private var recorded2: [ESRecorded] = []
+    /// いま録画中の番組（EPGStation の「録画済み」には入らないので、別に取る）
+    @State private var live1: [ESRecorded] = []
+    @State private var live2: [ESRecorded] = []
     @State private var recordedTotal2 = 0
     @State private var names2: [Int: String] = [:]
     @State private var rules: [ESRule] = []
@@ -45,8 +48,15 @@ struct RecordingsView: View {
     /// 両方の EPGStation の録画を、開始が新しい順に
     private var merged: [RecItem] {
         var out: [RecItem] = []
-        if let es { out += recorded.map { RecItem(rec: $0, es: es, second: false) } }
-        if let es2 { out += recorded2.map { RecItem(rec: $0, es: es2, second: true) } }
+        let done1 = Set(recorded.map(\.id)), done2 = Set(recorded2.map(\.id))
+        if let es {
+            out += live1.filter { !done1.contains($0.id) }.map { RecItem(rec: $0, es: es, second: false) }
+            out += recorded.map { RecItem(rec: $0, es: es, second: false) }
+        }
+        if let es2 {
+            out += live2.filter { !done2.contains($0.id) }.map { RecItem(rec: $0, es: es2, second: true) }
+            out += recorded2.map { RecItem(rec: $0, es: es2, second: true) }
+        }
         return out.sorted { $0.rec.startAt > $1.rec.startAt }
     }
 
@@ -184,7 +194,7 @@ struct RecordingsView: View {
 
     private var recordedRows: some View {
         Group {
-            if recorded.isEmpty && recorded2.isEmpty && !loading { empty("録画はありません") }
+            if merged.isEmpty && !loading { empty("録画はありません") }
             ForEach(merged) { item in
                 Button { session.playRecorded(item.rec, es: item.es) } label: { recordedRow(item) }
                     .buttonStyle(.plain)
@@ -323,6 +333,9 @@ struct RecordingsView: View {
                 await reserves.refresh()
                 errorText = reserves.error
             case .recorded:
+                // 録画中の番組は毎回取り直す（録画済みの一覧には入らない）
+                live1 = (try? await es.recording()) ?? []
+                if let es2 { live2 = (try? await es2.recording()) ?? [] } else { live2 = [] }
                 if force || recorded.isEmpty {
                     let r = try await es.recorded(offset: 0, limit: 30)
                     recorded = r.records; recordedTotal = r.total
