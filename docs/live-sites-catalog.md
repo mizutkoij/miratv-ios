@@ -553,3 +553,18 @@ Owner: "world じゃなくて各放送局の番組表ほしい" -> each broadcas
 - **Correction**: the earlier "NBC News NOW" registration (Q.31, `us-nbcnewsnow`, service 1325) was actually NBC New York's local FAST news feed (`ads.caid=NBCNNY`, `channelName=nbcnewyorknews`, path 88889709), not national NBC News NOW. Renamed to `NBC New York News（アメリカ）`; the Q.31 text describing it as NBC News NOW is superseded.
 - Registered (bridge-verified, all h264 1080 + aac, 1 benign error line): 1325 NBC New York News, 1326 NBC Los Angeles News, 1327 Telemundo California Noticias, 1328 CBS News 24/7, 1329 CBS News Los Angeles. `stations.json` = 152. Guides: 24 h placeholders. URLs live only in `stations.json` on homeserver (chmod 600), not in notes.
 - Not obtainable: KTLA (403 to curl), ABC7 / FOX LA / Univision KMEX (no manifest in page), PBS SoCal (`player.pbs.org`, needs location/Passport; same class as THIRTEEN). ABC (DSS/Widevine, country-bound) stays excluded.
+
+### Q.35 TBS (US) HAR reviewed, not pursued (2026-10-30 JST)
+- Owner supplied a HAR of tbs.com/watchtbs/west and asked to watch US TBS. From Japan, tbs.com redirects to the international Warner Bros. Discovery page (no live).
+- HAR shows the live feed is Widevine-protected (CENC) HLS on warnermediacdn.com with SSAI; the page also calls Adobe Pass (TV-provider authentication). It is a pay-TV network feed.
+- Decision: not pursued. Obtaining decryption keys for a pay-TV network the owner has no subscription to is out of scope; `us-tbs` stays a guide-only channel (`*`). No key extraction was run on this HAR.
+
+### Q.36 Remaining `*` US cable channels swept (2026-10-30 JST)
+- Owner: check the rest in a quick pass, no deep dive. All from the Japan connection (homeserver-equivalent; the owner's own network — the earlier Taiwan/VPN confusion, see below, is unrelated and resolved).
+- **Geo-blocked from Japan (403)**: FX, FXX, Discovery Channel, Food Network, HGTV, TLC.
+- **TV-provider login required (MVPD/sign-in text on the page)**: HBO (ties to HBO Max subscription), USA Network, Bravo (redirects to nbc.com/live, login), A&E, truTV, Big Ten Network, NHL Network, beIN Sports, TCM, Freeform, Lifetime.
+- **Page reachable but no live-stream route found at the guessed URL (404/202, likely wrong path or app-only)**: Comedy Central, SEC Network, ACC Network, ESPN Deportes, Syfy, MTV, BET, Paramount Network.
+- **Page loads, no manifest, no obvious login wall either (needs a closer look if ever revisited)**: National Geographic, Tennis Channel, Disney Channel, LMN, Travel Channel, Animal Planet.
+- **Willow**: the one `.m3u8` hit was a stale Kaltura entry URL from an old HTML snapshot — re-tested, 404 (expired). Not usable.
+- Conclusion: of the `*` US cable set (USA Network through PBS WNET, Q.32/Q.36 combined), none had a legitimate free path from Japan. They stay guide-only. The realistic way to add more playable US channels remains free official FAST/local feeds (as found for NBC NY/LA, Telemundo CA, CBS News national/LA, Fox Weather, Newsmax, NBCLX, PBS Kids, Bloomberg) or the owner's own paid-subscription HAR (as reviewed and declined for TBS, Q.35).
+- Session note: a burst of contradictory location claims (Taiwan / Japan / Taiwan / São Paulo within minutes) traced to PrivadoVPN auto-reconnecting to different exit servers (Base IP B.V. US-LA, then NL Amsterdam) while the owner's messages didn't match; confirmed resolved once the VPN tunnel adapter was fully down and the PC's IP matched the known home NURO line (150.249.66.100, Yokohama). No stream work was done against any of those VPN-exit IPs.

@@ -6,6 +6,7 @@ struct SettingsView: View {
     @AppStorage("mirakurun2URL") private var mirakurun2URL = Defaults.mirakurun2URL
     @AppStorage("epgstationURL") private var epgstationURL = Defaults.epgstationURL
     @AppStorage("epgstation2URL") private var epgstation2URL = Defaults.epgstation2URL
+    @AppStorage("vodMonitorURL") private var vodMonitorURL = Defaults.vodMonitorURL
     @AppStorage("radioWebURL") private var radioURL = Defaults.radioWebURL
     @AppStorage("radioSearchURL") private var radioSearchURL = Defaults.radioSearchURL
     @AppStorage("webbmlURL") private var webbmlURL = Defaults.webbmlURL
@@ -45,6 +46,8 @@ struct SettingsView: View {
                     field("EPGStation（番組表・録画・変換配信）", $epgstationURL, Defaults.epgstationURL, key: "epgstation")
                     field("EPGStation 2（2 台目の番組表）", $epgstation2URL, Defaults.epgstation2URL, key: "epgstation2",
                           hint: "Mirakurun 2 に切り替えているとき、番組表はこちらを使います。予約・録画は 1 台目だけです。")
+                    field("VOD Monitor（配信の一覧）", $vodMonitorURL, Defaults.vodMonitorURL, key: "vodmonitor",
+                          hint: "録画タブの「配信」。J-Sports・GIANTS TV・FOD・虎テレのライブとオンデマンドを再生します。")
                     field("radio-web（ラジオ）", $radioURL, Defaults.radioWebURL, key: "radio")
                     field("ラジオ検索（過去の番組を探す）", $radioSearchURL, Defaults.radioSearchURL, key: "radiosearch",
                           hint: "VPS2 の radio-search。約 50 万件の過去番組を全文検索します（端末には全件を持ちません）。")

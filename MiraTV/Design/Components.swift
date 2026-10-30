@@ -12,6 +12,8 @@ enum Defaults {
     static let epgstationURL = "http://192.0.2.10:8888"
     /// 2 台目の Mirakurun に付いている EPGStation（韓国・配信系。番組表だけ使う）
     static let epgstation2URL = "http://192.0.2.10:8890"
+    /// homeserver の VOD Monitor（jod-vod-monitor。J-Sports / GIANTS TV / FOD などの HLS 配信の一覧）
+    static let vodMonitorURL = "http://192.0.2.10:36197"
     /// homeserver の CM 検出サービス（録画の無音位置から CM ブロックを推定）
     static let chapterURL = "http://192.0.2.10:23235"
     /// データ放送（web-bml）は自分で立てたサーバーの URL を設定画面で入れる。空なら「データ」は使えない

@@ -12,10 +12,18 @@ final class HLSPlayback: ObservableObject {
     private var statusObservation: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
 
-    func play(url: URL) {
+    func play(url: URL) { play(url: url, headers: nil) }
+
+    /// headers: 配信元が Referer などを見るときの追加ヘッダー（AVURLAsset の HTTP ヘッダー指定）
+    func play(url: URL, headers: [String: String]?) {
         stop()
         state = .loading
-        let item = AVPlayerItem(url: url)
+        let item: AVPlayerItem
+        if let headers {
+            item = AVPlayerItem(asset: AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers]))
+        } else {
+            item = AVPlayerItem(url: url)
+        }
         statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             DispatchQueue.main.async {
                 guard let self else { return }

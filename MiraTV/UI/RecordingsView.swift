@@ -3,7 +3,7 @@ import AVKit
 
 /// DESIGN.md「録画（Recordings）」: 予約 / 録画済み / ルール
 struct RecordingsView: View {
-    enum Segment: String, CaseIterable { case reserves = "予約", recorded = "録画済み", rules = "ルール", archive = "アーカイブ" }
+    enum Segment: String, CaseIterable { case reserves = "予約", recorded = "録画済み", rules = "ルール", archive = "アーカイブ", vod = "配信" }
 
     @AppStorage("epgstationURL") private var epgURL = Defaults.epgstationURL
     @AppStorage("epgstation2URL") private var epg2URL = Defaults.epgstation2URL
@@ -62,6 +62,7 @@ struct RecordingsView: View {
 
     private var statusLine: StatusLine {
         if segment == .archive { return archiveStatus }
+        if segment == .vod { return StatusLine(text: "VOD Monitor · HLS の配信") }
         if let errorText { return StatusLine(text: errorText, color: Theme.C.rec) }
         return StatusLine(text: "EPGStation \(storageText.isEmpty ? "" : "· 空き \(storageText)")")
     }
@@ -72,7 +73,9 @@ struct RecordingsView: View {
             VStack(alignment: .leading, spacing: 0) {
                 ScreenHeader(title: "録画", status: statusLine) {
                     HStack(spacing: 8) {
-                        if segment == .archive {
+                        if segment == .vod {
+                            EmptyView()
+                        } else if segment == .archive {
                             // タップで新しい分だけ。長押しで全件を取り直す（件数が合わないときなど）
                             CircleButton(systemName: "arrow.clockwise") { Task { await archive.refresh() } }
                                 .contextMenu {
@@ -96,6 +99,8 @@ struct RecordingsView: View {
                 if segment == .archive {
                     // 検索欄を上に固定し、7 万件の一覧を自前のスクロールで出す
                     UsenetArchiveView()
+                } else if segment == .vod {
+                    VODMonitorView()
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 6) {
@@ -103,7 +108,7 @@ struct RecordingsView: View {
                             case .reserves: reserveRows
                             case .recorded: recordedRows
                             case .rules: ruleRows
-                            case .archive: EmptyView()
+                            case .archive, .vod: EmptyView()
                             }
                         }
                         .padding(.horizontal, 12).padding(.bottom, 16)
@@ -319,7 +324,7 @@ struct RecordingsView: View {
     }
 
     private func load(force: Bool) async {
-        if segment == .archive { return }       // アーカイブは UsenetArchiveView が自分で読む（EPGStation は使わない）
+        if segment == .archive || segment == .vod { return }       // アーカイブ・配信は各 View が自分で読む（EPGStation は使わない）
         guard let es else { errorText = "EPGStation の URL が設定されていません"; return }
         loading = true
         defer { loading = false }
@@ -345,7 +350,7 @@ struct RecordingsView: View {
             case .rules:
                 rules = try await es.rules()
                 errorText = nil
-            case .archive:
+            case .archive, .vod:
                 break
             }
         } catch {
