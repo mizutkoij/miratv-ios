@@ -20,6 +20,10 @@ final class RadioOverlay: ObservableObject {
     var isActive: Bool { phase != .off }
 
     private static let window: TimeInterval = 45 * 60
+    /// 聴き逃しのプレイリストは 1 区間を 5.035 秒と宣言するが、区間は放送時刻で 5 秒ごと（ファイル名が 180000, 180005, …）。
+    /// プレイリスト上の秒 = 放送の経過秒 × この値。掛けないと窓の中で 0.7% ずれる（45 分で約 19 秒、3 時間で約 75 秒）。
+    /// 実測: radio-web の /timefree/radiko/TBS.m3u8（2026-10-31）
+    private static let timelineScale = 5.035 / 5.0
     /// 窓の終わりのこの秒数手前まで来たら、次の窓を取り直す
     private static let edgeMargin: TimeInterval = 30
     private static let jst: DateFormatter = {
@@ -86,11 +90,11 @@ final class RadioOverlay: ObservableObject {
         // 窓の外（または窓がまだ無い）→ 取り直す
         if let s = chunkStart, let e = chunkEnd, target >= s, target < e.addingTimeInterval(-Self.edgeMargin) {
             guard let item = player.currentItem, item.status == .readyToPlay else { return }
-            let current = s.timeIntervalSince1970 + player.currentTime().seconds
+            let current = s.timeIntervalSince1970 + player.currentTime().seconds / Self.timelineScale
             let drift = current - target.timeIntervalSince1970
             if abs(drift) > 1.5, Date().timeIntervalSince(lastSeek) > 3 {
                 lastSeek = Date()
-                player.seek(to: CMTime(seconds: target.timeIntervalSince(s), preferredTimescale: 600),
+                player.seek(to: CMTime(seconds: target.timeIntervalSince(s) * Self.timelineScale, preferredTimescale: 600),
                             toleranceBefore: .zero, toleranceAfter: .zero)
             }
             if paused { if player.timeControlStatus != .paused { player.pause() } }
