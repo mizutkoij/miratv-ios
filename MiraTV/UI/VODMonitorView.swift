@@ -48,7 +48,70 @@ enum VODMonitor {
         let (data, res) = try await URLSession.shared.data(for: req)
         if let http = res as? HTTPURLResponse, !(200..<300).contains(http.statusCode) { throw URLError(.badServerResponse) }
         let html = String(decoding: data, as: UTF8.self)
-        return await Task.detached(priority: .userInitiated) { parse(html, base: base) }.value
+        var out = await Task.detached(priority: .userInitiated) { parse(html, base: base) }.value
+        // EasySports はモニターのページでは別画面（/vod-test）なので、その JSON から一覧を作る
+        if let es = await easysports(base: base) {
+            // メインのページにも 1 件だけ EasySports が混ざっているので、重複しないよう外す
+            out = out.compactMap { sec in
+                let groups = sec.groups.compactMap { g -> VODGroup? in
+                    let items = g.items.filter { if case .easysports = $0.kind { return false } else { return true } }
+                    return items.isEmpty ? nil : VODGroup(id: g.id, title: g.title, items: items)
+                }
+                return groups.isEmpty ? nil : VODSection(id: sec.id, title: sec.title, isLive: sec.isLive, groups: groups)
+            }
+            out = es + out
+        }
+        return out
+    }
+
+    // MARK: EasySports（/api/easysports-slots と /api/easysports-vod-list）
+
+    private struct ESSlots: Decodable {
+        struct Slot: Decodable { let slot: Int?; let stripped: String?; let mediaId: String? }
+        let slots: [Slot]?
+    }
+    private struct ESList: Decodable {
+        struct Item: Decodable { let id: Int; let gameDate: String?; let title: String?; let playable: Bool?; let src: String?; let mediaId: String? }
+        let items: [Item]
+    }
+
+    private static func getJSON<T: Decodable>(_ base: URL, _ path: String, _ type: T.Type) async -> T? {
+        var req = URLRequest(url: base.appending(path: path))
+        req.timeoutInterval = 30
+        guard let (data, res) = try? await URLSession.shared.data(for: req),
+              (res as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
+    private static func easysports(base: URL) async -> [VODSection]? {
+        async let slotsReq = getJSON(base, "api/easysports-slots", ESSlots.self)
+        async let listReq = getJSON(base, "api/easysports-vod-list", ESList.self)
+        let (slots, list) = await (slotsReq, listReq)
+        guard let list else { return nil }
+        var out: [VODSection] = []
+        let lives = (slots?.slots ?? []).compactMap { s -> VODItem? in
+            guard let mid = s.mediaId, let u = URL(string: "/easysports-vod/\(mid)/master.m3u8", relativeTo: base)?.absoluteURL else { return nil }
+            return VODItem(id: "es-live-\(mid)", title: s.stripped ?? "EasySports slot \(s.slot ?? 0)", time: "", sub: "EasySports",
+                           thumb: nil, kind: .direct(u), live: true)
+        }
+        if !lives.isEmpty {
+            out.append(VODSection(id: "es-live", title: "EasySports ライブ", isLive: true, groups: [VODGroup(id: "es-live-g", title: "", items: lives)]))
+        }
+        // 日付の新しい順に、日ごとのグループにする（601 件ほどあるので LazyVStack で出す）
+        let playable = list.items.filter { $0.playable == true && $0.mediaId != nil }
+            .sorted { ($0.gameDate ?? "") > ($1.gameDate ?? "") }
+        var byDay: [(String, [VODItem])] = []
+        for x in playable {
+            guard let src = x.src, let u = URL(string: src, relativeTo: base)?.absoluteURL else { continue }
+            let day = x.gameDate ?? "日付なし"
+            let item = VODItem(id: "es-\(x.id)", title: x.title ?? "", time: "", sub: "", thumb: nil, kind: .direct(u), live: false)
+            if let i = byDay.firstIndex(where: { $0.0 == day }) { byDay[i].1.append(item) } else { byDay.append((day, [item])) }
+        }
+        if !byDay.isEmpty {
+            out.append(VODSection(id: "es-vod", title: "EasySports VOD（\(playable.count)）", isLive: false,
+                                  groups: byDay.map { VODGroup(id: "es-\($0.0)", title: $0.0, items: $0.1) }))
+        }
+        return out
     }
 
     // MARK: 解析
