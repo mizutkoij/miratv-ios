@@ -13,11 +13,13 @@ struct GuideView: View {
     @AppStorage("epgstationURL") private var epgURL = Defaults.epgstationURL
     @AppStorage("epgstation2URL") private var epg2URL = Defaults.epgstation2URL
     @AppStorage("mirakurun2URL") private var url2 = Defaults.mirakurun2URL
-    @AppStorage("mirakurunActive") private var activeServer = 0
     @AppStorage("showInactiveChannels") private var showInactive = false
     @EnvironmentObject private var reserves: ReserveStore
-    /// 2 台目の Mirakurun を見ている（番組表は 2 台目の EPGStation）
-    private var onSecond: Bool { !url2.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && activeServer == 1 }
+    /// 番組表で 2 台目（配信・韓国）を見ているか。チャンネル画面の選択とは独立で、起動したときは必ずテレビ（1 台目）
+    @State private var guideSecond = false
+    private var hasSecond: Bool { !url2.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var onSecond: Bool { hasSecond && guideSecond }
+    private var guideES: EPGStationClient? { onSecond ? Servers.epgstation2 : Servers.epgstation }
 
     @State private var band = "GR"
     @State private var showSearch = false
@@ -112,6 +114,12 @@ struct GuideView: View {
                         CircleButton(systemName: "magnifyingglass") { showSearch = true }
                             .accessibilityLabel("番組を探す")
                         Menu {
+                            if hasSecond {
+                                Picker("番組表", selection: $guideSecond) {
+                                    Text("テレビ（Mirakurun 1）").tag(false)
+                                    Text("配信・韓国（Mirakurun 2）").tag(true)
+                                }
+                            }
                             Picker("放送波", selection: $band) {
                                 ForEach(bands, id: \.self) { Text(bandLabel($0)).tag($0) }
                             }
@@ -157,7 +165,7 @@ struct GuideView: View {
             }
         }
         .sheet(isPresented: $showSearch) { ProgramSearchSheet().environmentObject(reserves) }
-        .onChange(of: activeServer) { _, _ in
+        .onChange(of: guideSecond) { _, _ in
             columns = []; loadedDay = nil
             if !bands.contains(band) { band = bands[0] }
         }
@@ -318,7 +326,7 @@ struct GuideView: View {
     /// 表示中の日が出たら、残りの日も 1 日ずつ裏で取っておく（日付を切り替えたときに待たないように）。
     /// 端末に 1 時間以内の分があれば取らない。日付や放送波を切り替えると task ごと止まる
     private func prefetchOtherDays() async {
-        guard let es = Servers.epgstationForGuide else { return }
+        guard let es = guideES else { return }
         for offset in Self.dayOffsets where offset != dayOffset {
             if Task.isCancelled { return }
             let key = cacheKey(offset)
@@ -358,7 +366,7 @@ struct GuideView: View {
         }
         // 過去の日: サーバーは終わった番組を消していくので、端末に残っている分（その日に見たときのもの）を優先する
         if dayOffset < 0, showingStale { cache[key] = columns; return }
-        guard let es = Servers.epgstationForGuide else { errorText = "EPGStation の URL が設定されていません"; return }
+        guard let es = guideES else { errorText = "EPGStation の URL が設定されていません"; return }
         loading = true
         defer { loading = false }
         do {

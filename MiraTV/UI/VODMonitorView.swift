@@ -41,16 +41,31 @@ enum VODMonitor {
         return URL(string: s)
     }
 
-    static func fetch() async throws -> [VODSection] {
+    /// 今の月（日本時間）。"2026-10"
+    static var currentMonth: String {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+        let c = cal.dateComponents([.year, .month], from: Date())
+        return String(format: "%04d-%02d", c.year ?? 2026, c.month ?? 1)
+    }
+
+    /// month: "2026-09" のように指定すると、モニターの `?month=` でその月のオンデマンドを読む（nil = 今の月）
+    static func fetch(month: String? = nil) async throws -> [VODSection] {
         guard let base = baseURL else { throw URLError(.badURL) }
-        var req = URLRequest(url: base)
+        var url = base
+        if let month, month != currentMonth {
+            var c = URLComponents(url: base, resolvingAgainstBaseURL: false)!
+            c.queryItems = [URLQueryItem(name: "month", value: month)]
+            url = c.url ?? base
+        }
+        var req = URLRequest(url: url)
         req.timeoutInterval = 30
         let (data, res) = try await URLSession.shared.data(for: req)
         if let http = res as? HTTPURLResponse, !(200..<300).contains(http.statusCode) { throw URLError(.badServerResponse) }
         let html = String(decoding: data, as: UTF8.self)
         var out = await Task.detached(priority: .userInitiated) { parse(html, base: base) }.value
         // EasySports はモニターのページでは別画面（/vod-test）なので、その JSON から一覧を作る
-        if let es = await easysports(base: base) {
+        if let es = await easysports(base: base, month: month ?? currentMonth) {
             // メインのページにも 1 件だけ EasySports が混ざっているので、重複しないよう外す
             out = out.compactMap { sec in
                 let groups = sec.groups.compactMap { g -> VODGroup? in
@@ -59,7 +74,7 @@ enum VODMonitor {
                 }
                 return groups.isEmpty ? nil : VODSection(id: sec.id, title: sec.title, isLive: sec.isLive, groups: groups)
             }
-            out = es + out
+            out += es          // 件数が多い（600 件超）ので、J-Sports・GIANTS TV などの後ろに置く
         }
         return out
     }
@@ -83,7 +98,7 @@ enum VODMonitor {
         return try? JSONDecoder().decode(T.self, from: data)
     }
 
-    private static func easysports(base: URL) async -> [VODSection]? {
+    private static func easysports(base: URL, month: String) async -> [VODSection]? {
         async let slotsReq = getJSON(base, "api/easysports-slots", ESSlots.self)
         async let listReq = getJSON(base, "api/easysports-vod-list", ESList.self)
         let (slots, list) = await (slotsReq, listReq)
@@ -94,11 +109,11 @@ enum VODMonitor {
             return VODItem(id: "es-live-\(mid)", title: s.stripped ?? "EasySports slot \(s.slot ?? 0)", time: "", sub: "EasySports",
                            thumb: nil, kind: .direct(u), live: true)
         }
-        if !lives.isEmpty {
+        if !lives.isEmpty && month == currentMonth {
             out.append(VODSection(id: "es-live", title: "EasySports ライブ", isLive: true, groups: [VODGroup(id: "es-live-g", title: "", items: lives)]))
         }
         // 日付の新しい順に、日ごとのグループにする（601 件ほどあるので LazyVStack で出す）
-        let playable = list.items.filter { $0.playable == true && $0.mediaId != nil }
+        let playable = list.items.filter { $0.playable == true && $0.mediaId != nil && ($0.gameDate ?? "").hasPrefix(month) }
             .sorted { ($0.gameDate ?? "") > ($1.gameDate ?? "") }
         var byDay: [(String, [VODItem])] = []
         for x in playable {
@@ -108,7 +123,7 @@ enum VODMonitor {
             if let i = byDay.firstIndex(where: { $0.0 == day }) { byDay[i].1.append(item) } else { byDay.append((day, [item])) }
         }
         if !byDay.isEmpty {
-            out.append(VODSection(id: "es-vod", title: "EasySports VOD（\(playable.count)）", isLive: false,
+            out.append(VODSection(id: "es-vod", title: "EasySports VOD（\(month)・\(playable.count)）", isLive: false,
                                   groups: byDay.map { VODGroup(id: "es-\($0.0)", title: $0.0, items: $0.1) }))
         }
         return out
@@ -236,6 +251,8 @@ struct VODMonitorView: View {
     @State private var loading = false
     @State private var errorText: String?
     @State private var filter = 0            // 0 ライブ, 1 オンデマンド, 2 韓国録画（TVH の DVR）
+    /// オンデマンドで見ている月（"2026-10"）。モニターは 2014 年まで月ごとにさかのぼれる
+    @State private var month = VODMonitor.currentMonth
     @State private var playing: VODPlay?
     @State private var resolvingID: String?
 
@@ -247,6 +264,7 @@ struct VODMonitorView: View {
         VStack(spacing: 0) {
             SegmentedPills(options: [0, 1, 2], label: { $0 == 0 ? "ライブ" : $0 == 1 ? "オンデマンド" : "韓国録画" }, selection: $filter)
                 .padding(.horizontal, 12).padding(.bottom, 8)
+            if filter == 1 { monthBar }
             if filter == 2 {
                 TVHRecordingsList()
             } else {
@@ -281,8 +299,54 @@ struct VODMonitorView: View {
             .refreshable { await load() }
             }
         }
-        .task(id: monitorURL) { await load() }
+        .task(id: "\(monitorURL)-\(month)") { await load() }
         .fullScreenCover(item: $playing) { p in VODPlayerView(item: p.item, url: p.url) }
+    }
+
+    private var monthParts: (y: Int, m: Int) {
+        let p = month.split(separator: "-").compactMap { Int($0) }
+        return (p.first ?? 2026, p.count > 1 ? p[1] : 1)
+    }
+
+    private func shift(_ d: Int) {
+        let (y, m) = monthParts
+        let n = (y * 12 + (m - 1)) + d
+        let next = String(format: "%04d-%02d", n / 12, n % 12 + 1)
+        guard next <= VODMonitor.currentMonth, next >= "2014-01" else { return }
+        month = next
+    }
+
+    /// ‹ 2026年10月 › で月をさかのぼる（年・月は真ん中から選べる）
+    private var monthBar: some View {
+        let (y, m) = monthParts
+        let nowY = Int(VODMonitor.currentMonth.prefix(4)) ?? 2026
+        return HStack(spacing: 10) {
+            Button { shift(-1) } label: { Image(systemName: "chevron.left").frame(width: 40, height: 32) }
+                .disabled(month <= "2014-01")
+            Menu {
+                ForEach(Array(stride(from: nowY, through: 2014, by: -1)), id: \.self) { yy in
+                    Menu("\(yy)年") {
+                        ForEach(1...12, id: \.self) { mm in
+                            let s = String(format: "%04d-%02d", yy, mm)
+                            if s <= VODMonitor.currentMonth { Button("\(mm)月") { month = s } }
+                        }
+                    }
+                }
+            } label: {
+                Text("\(String(y))年\(m)月").font(Theme.F.jp(14, .bold)).foregroundStyle(Theme.C.text)
+                    .padding(.horizontal, 14).frame(height: 32)
+                    .background(Theme.C.surface, in: Capsule()).overlay(Capsule().stroke(Theme.C.border))
+            }
+            Button { shift(1) } label: { Image(systemName: "chevron.right").frame(width: 40, height: 32) }
+                .disabled(month >= VODMonitor.currentMonth)
+            Spacer()
+            if month != VODMonitor.currentMonth {
+                Button("今月") { month = VODMonitor.currentMonth }
+                    .font(Theme.F.jp(12, .medium)).foregroundStyle(Theme.C.accent)
+            }
+        }
+        .foregroundStyle(Theme.C.text2)
+        .padding(.horizontal, 12).padding(.bottom, 6)
     }
 
     private func row(_ item: VODItem) -> some View {
@@ -332,7 +396,7 @@ struct VODMonitorView: View {
         loading = true
         defer { loading = false }
         do {
-            sections = try await VODMonitor.fetch()
+            sections = try await VODMonitor.fetch(month: month)
             errorText = nil
             if filter == 0, sections.allSatisfy({ !$0.isLive }) { filter = 1 }
         } catch {
