@@ -12,6 +12,9 @@ struct RecordedPlayerView: View {
     @StateObject private var engine = PlayerEngine()
     @StateObject private var bml = BMLController()
     @StateObject private var captions = CaptionController()
+    /// 野球中継などの実況を、radiko の聴き逃しのラジオ音声に差し替える
+    @StateObject private var radioOverlay = RadioOverlay()
+    @State private var showRadioSheet = false
     @EnvironmentObject private var radio: RadioPlayer
     @EnvironmentObject private var session: PlaybackSession
     @EnvironmentObject private var epg: EPGStore
@@ -91,6 +94,8 @@ struct RecordedPlayerView: View {
             }
         }
         .onAppear { start() }
+        .modifier(RadioOverlayHooks(overlay: radioOverlay, engine: engine, showSheet: $showRadioSheet,
+                                    recordedStart: recorded.start))
         .task { await loadChapters() }
         .onChange(of: engine.position) { _, _ in autoSkipIfNeeded() }
         .onChange(of: engine.state) { _, s in handleStateChange(s) }
@@ -154,6 +159,7 @@ struct RecordedPlayerView: View {
             }
             startTask?.cancel()
             followOKTask?.cancel()
+            radioOverlay.stop()
             comments.stopAll()
             nowPlaying.deactivate()
             engine.stop()
@@ -476,6 +482,9 @@ struct RecordedPlayerView: View {
             // TS の先頭 ≒ 録画の開始時刻（EPGStation の startAt）。数秒ずれることがある
             comments.tick(broadcastTime: recorded.start.timeIntervalSince1970 + pos)
         }
+        if !useAVPlayer {
+            radioOverlay.tick(recordedStart: recorded.start, position: pos, paused: paused, rate: engine.playbackRate)
+        }
         if Date().timeIntervalSince(lastSaved) > 5 && pos > 0 {
             lastSaved = Date()
             WatchPositions.save(recorded.id, position: pos, duration: currentDuration)
@@ -742,6 +751,7 @@ struct RecordedPlayerView: View {
                                         active: captionsOn) { toggleCaptions() }
                             ControlTile(icon: "d.circle", label: "データ", enabled: dataURL != nil, active: dataMode) { dataMode = true }
                             ControlTile(icon: "text.bubble", label: "実況", enabled: jkID != nil, active: commentsOn) { commentsOn.toggle() }
+                            ControlTile(icon: "radio", label: "ラジオ", enabled: !useAVPlayer, active: radioOverlay.isActive) { showRadioSheet = true }
                             ControlTile(icon: "camera", label: "写真") { capture() }
                             ControlTile(icon: engine.isRecordingClip ? "stop.circle.fill" : "record.circle",
                                         label: engine.isRecordingClip ? "保存" : "録画", active: engine.isRecordingClip) { toggleClip() }
@@ -803,6 +813,7 @@ struct RecordedPlayerView: View {
                         Spacer()
                         CapsuleTile(label: "字幕", enabled: engine.info.hasCaption, active: captionsOn) { toggleCaptions() }
                         CapsuleTile(label: "実況", enabled: jkID != nil, active: commentsOn) { commentsOn.toggle() }
+                        CapsuleTile(label: "ラジオ", enabled: !useAVPlayer, active: radioOverlay.isActive) { showRadioSheet = true }
                         CapsuleTile(label: "写真") { capture() }
                         CapsuleTile(label: engine.isRecordingClip ? "● 保存" : "録画", active: engine.isRecordingClip) { toggleClip() }
                         if captionTextAvailable { CapsuleTile(label: "文字") { showCaptionText = true } }
