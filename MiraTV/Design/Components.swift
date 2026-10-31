@@ -14,6 +14,8 @@ enum Defaults {
     static let epgstation2URL = "http://192.0.2.10:8890"
     /// homeserver の VOD Monitor（jod-vod-monitor。J-Sports / GIANTS TV / FOD などの HLS 配信の一覧）
     static let vodMonitorURL = "http://192.0.2.10:36197"
+    /// homeserver の tvh-dvrd（韓国のサーバーの TVHeadend が録画したものを中継する。server/tvh-dvrd.mjs）
+    static let tvhDvrURL = "http://192.0.2.10:36205"
     /// homeserver の CM 検出サービス（録画の無音位置から CM ブロックを推定）
     static let chapterURL = "http://192.0.2.10:23235"
     /// データ放送（web-bml）は自分で立てたサーバーの URL を設定画面で入れる。空なら「データ」は使えない

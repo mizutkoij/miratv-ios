@@ -235,18 +235,21 @@ struct VODMonitorView: View {
     @State private var sections: [VODSection] = []
     @State private var loading = false
     @State private var errorText: String?
-    @State private var filter = 0            // 0 ライブ, 1 オンデマンド
+    @State private var filter = 0            // 0 ライブ, 1 オンデマンド, 2 韓国録画（TVH の DVR）
     @State private var playing: VODPlay?
     @State private var resolvingID: String?
 
     private struct VODPlay: Identifiable { let id = UUID(); let item: VODItem; let url: URL }
 
-    private var shown: [VODSection] { sections.filter { $0.isLive == (filter == 0) } }
+    private var shown: [VODSection] { filter == 2 ? [] : sections.filter { $0.isLive == (filter == 0) } }
 
     var body: some View {
         VStack(spacing: 0) {
-            SegmentedPills(options: [0, 1], label: { $0 == 0 ? "ライブ" : "オンデマンド" }, selection: $filter)
+            SegmentedPills(options: [0, 1, 2], label: { $0 == 0 ? "ライブ" : $0 == 1 ? "オンデマンド" : "韓国録画" }, selection: $filter)
                 .padding(.horizontal, 12).padding(.bottom, 8)
+            if filter == 2 {
+                TVHRecordingsList()
+            } else {
             if let errorText {
                 Text(errorText).font(Theme.F.caption).foregroundStyle(Theme.C.rec)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.bottom, 6)
@@ -276,6 +279,7 @@ struct VODMonitorView: View {
                 .padding(.horizontal, 12).padding(.bottom, 16)
             }
             .refreshable { await load() }
+            }
         }
         .task(id: monitorURL) { await load() }
         .fullScreenCover(item: $playing) { p in VODPlayerView(item: p.item, url: p.url) }

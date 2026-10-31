@@ -14,12 +14,15 @@ final class PlaybackSession: ObservableObject {
         case recorded(ESRecorded, EPGStationClient)
         /// Usenet のアーカイブ（VPS1 の nzb-dl から Range で読む）
         case usenet(UsenetEntry, NzbDlClient)
+        /// 韓国のサーバーの TVHeadend が録画したもの（homeserver の tvh-dvrd 経由）
+        case tvh(TVHRec, URL)
 
         var id: String {
             switch self {
             case .live(let s, _, _): "live-\(s.id)"
             case .recorded(let r, _): "rec-\(r.id)"
             case .usenet(let e, _): "nzb-\(e.id)"
+            case .tvh(let r, _): "tvh-\(r.uuid)"
             }
         }
     }
@@ -49,6 +52,12 @@ final class PlaybackSession: ObservableObject {
         seekRequest = time.map { SeekRequest(recordedId: recorded.id, time: max($0, 0)) }
         if case .recorded(let r, _) = item, r.id == recorded.id { expand(); return }
         item = .recorded(recorded, es)
+        minimized = false
+    }
+
+    func playTVH(_ rec: TVHRec, url: URL) {
+        if case .tvh(let r, _) = item, r.uuid == rec.uuid { expand(); return }
+        item = .tvh(rec, url)
         minimized = false
     }
 
@@ -103,6 +112,8 @@ struct PlayerHost: View {
                 RecordedPlayerView(recorded: recorded, es: es)
             case .usenet(let entry, let client):
                 UsenetPlayerView(entry: entry, client: client)
+            case .tvh(let rec, let url):
+                TVHPlayerView(rec: rec, url: url)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: session.minimized ? nil : .infinity, alignment: .bottom)
