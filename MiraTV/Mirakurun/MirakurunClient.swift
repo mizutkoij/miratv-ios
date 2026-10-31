@@ -80,13 +80,31 @@ struct MirakurunClient {
         }
     }
 
+    /// 2 台目（ブリッジ）なら、局で絞って返す中継（m2-programs）。ブリッジ本体は絞り込みを無視して全局ぶん 14MB を返すため。
+    /// 中継が落ちているときは、これまでどおりブリッジに直接聞く
+    private var isSecondServer: Bool {
+        let s = (UserDefaults.standard.string(forKey: "mirakurun2URL") ?? Defaults.mirakurun2URL)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let u = URL(string: s) else { return false }
+        return u.host == baseURL.host && u.port == baseURL.port
+    }
+
     fileprivate func fetchPrograms(for service: MirakurunService) async throws -> [MirakurunProgram] {
-        var c = URLComponents(url: baseURL.appending(path: "api/programs"), resolvingAgainstBaseURL: false)!
+        if isSecondServer {
+            let s = (UserDefaults.standard.string(forKey: "programsLiteURL") ?? Defaults.programsLiteURL)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !s.isEmpty, let lite = URL(string: s), let list = try? await fetchPrograms(for: service, from: lite) { return list }
+        }
+        return try await fetchPrograms(for: service, from: baseURL)
+    }
+
+    private func fetchPrograms(for service: MirakurunService, from base: URL) async throws -> [MirakurunProgram] {
+        var c = URLComponents(url: base.appending(path: "api/programs"), resolvingAgainstBaseURL: false)!
         c.queryItems = [URLQueryItem(name: "networkId", value: String(service.networkId)),
                         URLQueryItem(name: "serviceId", value: String(service.serviceId))]
         var req = URLRequest(url: c.url!)
-        req.timeoutInterval = 45
-        let (data, res) = try await Net.data(for: req, retries: 1)
+        req.timeoutInterval = base == baseURL ? 45 : 15
+        let (data, res) = try await Net.data(for: req, retries: base == baseURL ? 1 : 0)
         if let http = res as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw URLError(.badServerResponse)
         }

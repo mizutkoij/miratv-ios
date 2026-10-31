@@ -16,6 +16,8 @@ enum Defaults {
     static let vodMonitorURL = "http://192.0.2.10:36197"
     /// homeserver の tvh-dvrd（韓国のサーバーの TVHeadend が録画したものを中継する。server/tvh-dvrd.mjs）
     static let tvhDvrURL = "http://192.0.2.10:36205"
+    /// homeserver の m2-programs（2 台目の番組情報を局で絞って返す。server/m2-programs.mjs）。ブリッジの /api/programs は絞り込みを守らず 14MB 返す
+    static let programsLiteURL = "http://192.0.2.10:36206"
     /// homeserver の CM 検出サービス（録画の無音位置から CM ブロックを推定）
     static let chapterURL = "http://192.0.2.10:23235"
     /// データ放送（web-bml）は自分で立てたサーバーの URL を設定画面で入れる。空なら「データ」は使えない
